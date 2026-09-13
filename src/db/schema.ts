@@ -1,12 +1,7 @@
-import { pgTable, text, timestamp, uuid, varchar } from 'drizzle-orm/pg-core'
-
-export const users = pgTable('user', {
-  id: uuid('id').defaultRandom().primaryKey(),
-  email: varchar('email', { length: 255 }).notNull().unique(),
-  name: text('name'),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-  updatedAt: timestamp('updated_at', { withTimezone: true })
-    .notNull()
-    .defaultNow()
-    .$onUpdate(() => new Date()),
-})
+export * from "./orgs.js";
+export * from "./teams.js";
+export * from "./users.js";
+export * from "./sessions.js";
+export * from "./invites.js";
+export * from "./emailVerifications.js";
+export * from "./emailVerificationGrants.js";
