@@ -274,18 +274,18 @@ export async function buildOrgTree(orgId: string): Promise<TreeBuildResult> {
           .onConflictDoUpdate({
             target: users.externalHrmsId,
             set: {
-              orgId: sql`excluded.${users.orgId}`,
-              externalHrmsId: sql`excluded.${users.externalHrmsId}`,
-              role: sql`excluded.${users.role}`,
-              name: sql`excluded.${users.name}`,
-              email: sql`excluded.${users.email}`,
-              phone: sql`excluded.${users.phone}`,
-              region: sql`excluded.${users.region}`,
-              teamId: sql`excluded.${users.teamId}`,
-              hireDate: sql`excluded.${users.hireDate}`,
-              isSales: sql`excluded.${users.isSales}`,
-              source: sql`excluded.${users.source}`,
-              status: sql`excluded.${users.status}`,
+              orgId: sql`excluded."org_id"`,
+              externalHrmsId: sql`excluded."external_hrms_id"`,
+              role: sql`excluded."role"`,
+              name: sql`excluded."name"`,
+              email: sql`excluded."email"`,
+              phone: sql`excluded."phone"`,
+              region: sql`excluded."region"`,
+              teamId: sql`excluded."team_id"`,
+              hireDate: sql`excluded."hire_date"`,
+              isSales: sql`excluded."is_sales"`,
+              source: sql`excluded."source"`,
+              status: sql`excluded."status"`,
               updatedAt: new Date(),
             },
           })
@@ -388,7 +388,7 @@ export async function buildOrgTree(orgId: string): Promise<TreeBuildResult> {
       );
       await tx.execute(sql`
         update ${users}
-        set ${users.managerId} = v.manager_id, ${users.updatedAt} = now()
+        set "manager_id" = v.manager_id, "updated_at" = now()
         from (values ${sql.join(assignments, sql`, `)}) as v(report_id, manager_id)
         where ${users.id} = v.report_id
       `);
