@@ -55,6 +55,10 @@ export type SendOtpEmailInput = {
  * Throws if SMTP is not configured or the send fails.
  */
 export async function sendOtpEmail(input: SendOtpEmailInput): Promise<void> {
+  if (process.env["NODE_ENV"] !== "production") {
+    console.log(`[mail] OTP for ${input.to}: ${input.otp}`);
+  }
+
   const transporter = getTransporter();
 
   if (!transporter) {
