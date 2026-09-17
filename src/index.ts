@@ -4,6 +4,7 @@ import cors from "cors";
 import express, { type Request, type Response } from "express";
 
 import { authRouter } from "./routes/auth.js";
+import { hrmsRouter } from "./routes/hrms.js";
 import { invitesRouter } from "./routes/invites.js";
 import { orgsRouter } from "./routes/orgs.js";
 import { verifyRouter } from "./routes/verify.js";
@@ -22,9 +23,6 @@ app.use(
 app.use(express.json());
 app.use(cookieParser());
 
-// ---------------------------------------------------------------------------
-// Health
-// ---------------------------------------------------------------------------
 
 app.get("/", (_req: Request, res: Response) => {
   res.json({ message: "AgilityOS API" });
@@ -44,6 +42,7 @@ app.get("/health", (_req: Request, res: Response) => {
 
 app.use("/api/auth", authRouter);
 app.use("/api/orgs", orgsRouter);
+app.use("/api/hrms", hrmsRouter);
 app.use("/api/invites", invitesRouter);
 app.use("/api/verify", verifyRouter);
 

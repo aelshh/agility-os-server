@@ -28,6 +28,8 @@ export const userRoleEnum = pgEnum("user_role", [
   "talent_steward",
 ]);
 
+export type UserRole = (typeof userRoleEnum.enumValues)[number];
+
 export const userStatusEnum = pgEnum("user_status", [
   "invited",
   "active",

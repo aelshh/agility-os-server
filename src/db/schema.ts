@@ -5,3 +5,6 @@ export * from "./sessions.js";
 export * from "./invites.js";
 export * from "./emailVerifications.js";
 export * from "./emailVerificationGrants.js";
+export * from "./employees.js";
+export * from "./hrmsConnections.js";
+export * from "./reportingEdges.js";
