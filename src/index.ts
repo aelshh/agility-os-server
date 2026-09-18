@@ -8,6 +8,7 @@ import { authRouter } from "./routes/auth.js";
 import { hrmsRouter } from "./routes/hrms.js";
 import { invitesRouter } from "./routes/invites.js";
 import { orgsRouter } from "./routes/orgs.js";
+import { profileRouter } from "./routes/profile.js";
 import { verifyRouter } from "./routes/verify.js";
 
 const app = express();
@@ -47,6 +48,7 @@ app.use("/api/hrms", hrmsRouter);
 app.use("/api/invites", invitesRouter);
 app.use("/api/admins", adminsRouter);
 app.use("/api/verify", verifyRouter);
+app.use("/api/profile", profileRouter);
 
 // ---------------------------------------------------------------------------
 // Listen

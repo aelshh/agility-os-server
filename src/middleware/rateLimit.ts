@@ -53,3 +53,25 @@ export const inviteCreateLimiter = rateLimit({
     message: "Too many invite requests. Please try again in a few minutes.",
   },
 });
+
+/** Caps profile-field edits per IP. */
+export const profileUpdateLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000, // 10 minutes
+  limit: 30,
+  standardHeaders,
+  legacyHeaders,
+  message: {
+    message: "Too many requests. Please try again in a few minutes.",
+  },
+});
+
+/** Caps password-change attempts per IP (current-password guessing). */
+export const passwordChangeLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000, // 10 minutes
+  limit: 5,
+  standardHeaders,
+  legacyHeaders,
+  message: {
+    message: "Too many requests. Please try again in a few minutes.",
+  },
+});
