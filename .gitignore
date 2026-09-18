@@ -1,4 +1,28 @@
+# Dependencies
 node_modules
+
+# Build output
 dist
+*.js.map
+
+# Environment files (never commit secrets)
 .env
+.env.*
+!.env.example
+
+# Logs
 *.log
+logs
+
+# TypeScript
+*.tsbuildinfo
+
+# Drizzle Kit local state
+.drizzle
+
+# Test coverage
+coverage
+
+# Runtime files
+*.pid
+*.pid.lock
