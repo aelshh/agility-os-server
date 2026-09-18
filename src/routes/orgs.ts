@@ -19,7 +19,7 @@ import { Router } from "express";
 import { email, z } from "zod";
 
 import { db } from "../db/index.js";
-import { emailVerificationGrants, orgs, users } from "../db/schema.js";
+import { admins, emailVerificationGrants, orgs, users } from "../db/schema.js";
 import { createSession, hashToken, toPublicUser } from "../lib/auth.js";
 import { handleDatabaseError } from "../lib/dbErrors.js";
 import { isWorkEmail, WORK_EMAIL_MESSAGE } from "../lib/workEmail.js";
@@ -198,6 +198,14 @@ router.post("/", orgBootstrapLimiter, async (req, res) => {
         .returning();
 
       if (!newUser) throw new Error("Failed to create admin user");
+
+      // 5. The org founder is the first org admin (no granter recorded).
+      const [newAdmin] = await tx
+        .insert(admins)
+        .values({ orgId: newOrg.id, userId: newUser.id })
+        .returning();
+
+      if (!newAdmin) throw new Error("Failed to grant org admin");
 
       return [newOrg, newUser] as const;
     });

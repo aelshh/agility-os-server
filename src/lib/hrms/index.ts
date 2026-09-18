@@ -1,7 +1,9 @@
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, inArray, isNull } from "drizzle-orm";
 
 import { db } from "../../db/index.js";
+import { admins } from "../../db/admins.js";
 import { employees } from "../../db/employees.js";
+import { invites } from "../../db/invites.js";
 import { reportingEdges } from "../../db/reportingEdges.js";
 import { teams } from "../../db/teams.js";
 import { users } from "../../db/users.js";
@@ -56,13 +58,21 @@ export interface OrgTreeData {
     externalManagerId: string | null;
     name: string;
     email: string | null;
+    phone: string | null;
     designation: string | null;
     department: string | null;
     region: string | null;
     role: string;
     teamId: string | null;
+    hireDate: string | null;
     isSales: boolean;
     status: string;
+    /** Linked app user id if this employee has a provisioned account. */
+    userId: string | null;
+    /** Lifecycle of the provisioned account: invited | active | churned | null. */
+    userStatus: string | null;
+    hasPendingInvite: boolean;
+    isAdmin: boolean;
   }[];
   teams: {
     id: string;
@@ -76,24 +86,51 @@ export interface OrgTreeData {
     validTo: Date | null;
   }[];
   userRolesById: Record<string, string>;
+  /** Whether the viewer is a currently active org admin. */
+  viewerIsAdmin: boolean;
 }
 
-export async function getOrgTree(orgId: string): Promise<OrgTreeData> {
-  const [staff, teamRows, edgeRows, userRows] = await Promise.all([
-    db
-      .select()
-      .from(employees)
-      .where(and(eq(employees.orgId, orgId), eq(employees.status, "active"))),
-    db.select().from(teams).where(eq(teams.orgId, orgId)),
-    db
-      .select()
-      .from(reportingEdges)
-      .where(and(eq(reportingEdges.orgId, orgId), isNull(reportingEdges.validTo))),
-    db
-      .select({ id: users.id, externalHrmsId: users.externalHrmsId, role: users.role })
-      .from(users)
-      .where(eq(users.orgId, orgId)),
-  ]);
+export async function getOrgTree(
+  orgId: string,
+  viewerUserId: string | null,
+): Promise<OrgTreeData> {
+  const [staff, teamRows, edgeRows, userRows, inviteRows, adminRows] =
+    await Promise.all([
+      db
+        .select()
+        .from(employees)
+        .where(and(eq(employees.orgId, orgId), eq(employees.status, "active"))),
+      db.select().from(teams).where(eq(teams.orgId, orgId)),
+      db
+        .select()
+        .from(reportingEdges)
+        .where(and(eq(reportingEdges.orgId, orgId), isNull(reportingEdges.validTo))),
+      db
+        .select({
+          id: users.id,
+          externalHrmsId: users.externalHrmsId,
+          role: users.role,
+          status: users.status,
+        })
+        .from(users)
+        .where(eq(users.orgId, orgId)),
+      db
+        .select({ id: invites.id, targetUserId: invites.targetUserId })
+        .from(invites)
+        .where(and(eq(invites.orgId, orgId), eq(invites.status, "pending"))),
+      db
+        .select({ userId: admins.userId })
+        .from(admins)
+        .where(and(eq(admins.orgId, orgId), isNull(admins.revokedAt))),
+    ]);
+
+  const userByExternalId = new Map(
+    userRows
+      .filter((u) => u.externalHrmsId)
+      .map((u) => [u.externalHrmsId!, u] as const),
+  );
+  const pendingInviteUserIds = new Set(inviteRows.map((i) => i.targetUserId));
+  const adminUserIds = new Set(adminRows.map((a) => a.userId));
 
   const userRolesById = Object.fromEntries(
     userRows
@@ -102,20 +139,31 @@ export async function getOrgTree(orgId: string): Promise<OrgTreeData> {
   );
 
   return {
-    employees: staff.map((e) => ({
-      id: e.id,
-      externalHrmsId: e.externalHrmsId,
-      externalManagerId: e.externalManagerId,
-      name: e.name,
-      email: e.email,
-      designation: e.designation,
-      department: e.department,
-      region: e.region,
-      role: userRolesById[e.externalHrmsId] ?? "practitioner",
-      teamId: e.teamId,
-      isSales: e.isSales,
-      status: e.status,
-    })),
+    employees: staff.map((e) => {
+      const user = e.externalHrmsId
+        ? (userByExternalId.get(e.externalHrmsId) ?? null)
+        : null;
+      return {
+        id: e.id,
+        externalHrmsId: e.externalHrmsId,
+        externalManagerId: e.externalManagerId,
+        name: e.name,
+        email: e.email,
+        phone: e.phone,
+        designation: e.designation,
+        department: e.department,
+        region: e.region,
+        role: userRolesById[e.externalHrmsId] ?? "practitioner",
+        teamId: e.teamId,
+        hireDate: e.hireDate ?? null,
+        isSales: e.isSales,
+        status: e.status,
+        userId: user?.id ?? null,
+        userStatus: user?.status ?? null,
+        hasPendingInvite: user ? pendingInviteUserIds.has(user.id) : false,
+        isAdmin: user ? adminUserIds.has(user.id) : false,
+      };
+    }),
     teams: teamRows.map((t) => ({
       id: t.id,
       name: t.name,
@@ -128,5 +176,6 @@ export async function getOrgTree(orgId: string): Promise<OrgTreeData> {
       validTo: e.validTo,
     })),
     userRolesById,
+    viewerIsAdmin: viewerUserId ? adminUserIds.has(viewerUserId) : false,
   };
 }

@@ -3,6 +3,7 @@ import cookieParser from "cookie-parser";
 import cors from "cors";
 import express, { type Request, type Response } from "express";
 
+import { adminsRouter } from "./routes/admins.js";
 import { authRouter } from "./routes/auth.js";
 import { hrmsRouter } from "./routes/hrms.js";
 import { invitesRouter } from "./routes/invites.js";
@@ -44,6 +45,7 @@ app.use("/api/auth", authRouter);
 app.use("/api/orgs", orgsRouter);
 app.use("/api/hrms", hrmsRouter);
 app.use("/api/invites", invitesRouter);
+app.use("/api/admins", adminsRouter);
 app.use("/api/verify", verifyRouter);
 
 // ---------------------------------------------------------------------------

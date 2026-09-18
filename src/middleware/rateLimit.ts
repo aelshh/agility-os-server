@@ -42,3 +42,14 @@ export const otpResendLimiter = rateLimit({
     message: "Too many requests. Please try again in a few minutes.",
   },
 });
+
+/** Caps bulk invite creation per IP (a batch may contain many users). */
+export const inviteCreateLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000, // 10 minutes
+  limit: 50,
+  standardHeaders,
+  legacyHeaders,
+  message: {
+    message: "Too many invite requests. Please try again in a few minutes.",
+  },
+});

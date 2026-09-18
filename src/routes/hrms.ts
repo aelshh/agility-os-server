@@ -115,11 +115,17 @@ router.get("/tree", requireAuth, async (req, res) => {
     return;
   }
   if (!user.orgId) {
-    res.status(200).json({ employees: [], teams: [], reportingEdges: [], userRolesById: {} });
+    res.status(200).json({
+      employees: [],
+      teams: [],
+      reportingEdges: [],
+      userRolesById: {},
+      viewerIsAdmin: false,
+    });
     return;
   }
 
-  const tree = await getOrgTree(user.orgId);
+  const tree = await getOrgTree(user.orgId, user.id);
   res.status(200).json(tree);
 });
 

@@ -1,5 +1,6 @@
 import nodemailer, { type Transporter } from "nodemailer";
 
+import { buildInviteEmail } from "./templates/inviteEmail.js";
 import { buildOtpEmail } from "./templates/otpEmail.js";
 
 // ---------------------------------------------------------------------------
@@ -71,6 +72,64 @@ export async function sendOtpEmail(input: SendOtpEmailInput): Promise<void> {
     otp: input.otp,
     ...(input.userName !== undefined ? { userName: input.userName } : {}),
     ...(input.orgName !== undefined ? { orgName: input.orgName } : {}),
+  });
+
+  try {
+    await transporter.sendMail({
+      from: {
+        address: fromAddress(),
+        name: fromName(),
+      },
+      to: input.to,
+      subject,
+      html,
+      text,
+    });
+  } catch (err) {
+    const message =
+      err instanceof Error
+        ? err.message
+        : (JSON.stringify(err, null, 2) ?? String(err));
+    throw new Error(`[mail] SMTP send failed: ${message}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// sendInviteEmail
+// ---------------------------------------------------------------------------
+
+export type SendInviteEmailInput = {
+  to: string;
+  userName?: string | null;
+  orgName?: string | null;
+  inviteUrl: string;
+  sentByName?: string | null;
+};
+
+/**
+ * Sends the org-tree account invitation email via SMTP.
+ * Throws if SMTP is not configured or the send fails.
+ */
+export async function sendInviteEmail(
+  input: SendInviteEmailInput,
+): Promise<void> {
+  if (process.env["NODE_ENV"] !== "production") {
+    console.log(`[mail] Invite for ${input.to}: ${input.inviteUrl}`);
+  }
+
+  const transporter = getTransporter();
+
+  if (!transporter) {
+    throw new Error(
+      "[mail] SMTP is not configured (SMTP_HOST/SMTP_USER/SMTP_PASS) — cannot send invite email",
+    );
+  }
+
+  const { subject, html, text } = buildInviteEmail({
+    inviteUrl: input.inviteUrl,
+    ...(input.userName !== undefined ? { userName: input.userName } : {}),
+    ...(input.orgName !== undefined ? { orgName: input.orgName } : {}),
+    ...(input.sentByName !== undefined ? { sentByName: input.sentByName } : {}),
   });
 
   try {
