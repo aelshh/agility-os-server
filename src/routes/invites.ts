@@ -49,8 +49,9 @@ const createInvitesSchema = z.object({
  *    eligible. Anyone else is reported as skipped (with reason), never failed.
  *  - Any existing *pending* invite is revoked and replaced by a fresh token
  *    (matching the "revoke + new link" resend behaviour).
- *  - If the email fails to send, the invite row is revoked so no dead link is
- *    left behind and the user is reported as a failure.
+ *  - If the email fails to send, the invite row is kept valid (the link still
+ *    works), the error is reported as a failure, and the link is logged so it
+ *    can be shared manually for testing.
  */
 router.post(
   "/",
@@ -133,6 +134,7 @@ router.post(
 
         const { rawToken, tokenHash } = generateInviteToken();
         const expiresAt = new Date(Date.now() + INVITE_TTL_MS);
+        const inviteUrl = `${APP_ORIGIN}/accept/${rawToken}`;
 
         try {
           // Revoke any existing pending invite and insert the fresh one.
@@ -161,24 +163,28 @@ router.post(
             continue;
           }
 
-          // Send email; on failure revoke so no dead link remains.
+          // Send email; on failure the invite link stays valid so it can
+          // still be used. Report the failure and log the link for testing.
           try {
             await sendInviteEmail({
               to: target.email,
               userName: target.name,
               orgName: org.name,
               sentByName: user.name,
-              inviteUrl: `${APP_ORIGIN}/accept/${rawToken}`,
+              inviteUrl,
             });
             sent.push({ userId: targetUserId, email: target.email });
           } catch (err) {
-            await db
-              .update(invites)
-              .set({ status: "revoked" })
-              .where(eq(invites.id, newInvite.id));
             const message =
               err instanceof Error ? err.message : String(err);
-            failures.push({ userId: targetUserId, reason: `email: ${message}` });
+            console.error(
+              `[invites] email failed for ${target.email}; invite link is still valid: ${inviteUrl}`,
+              err,
+            );
+            failures.push({
+              userId: targetUserId,
+              reason: `email: ${message}`,
+            });
           }
         } catch (err) {
           failures.push({

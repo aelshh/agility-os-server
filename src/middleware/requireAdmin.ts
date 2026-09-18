@@ -1,9 +1,13 @@
 /**
  * Admin gate — org-scoped admin membership check.
  *
- * Unlike requireRole (which checks HRMS-derived role), this checks the
- * `org_admins` table for an active grant for the requesting user's org.
- * Enforced in middleware, not the UI.
+ * A user is treated as an org admin when either:
+ *  - `role = architect` (top-level role always has admin access), or
+ *  - they hold an active `org_admins` grant for their org.
+ *
+ * Unlike requireRole (which checks HRMS-derived role), the grant half checks
+ * the `org_admins` table for the requesting user's org. Enforced in
+ * middleware, not the UI.
  */
 
 import { and, eq, isNull } from "drizzle-orm";
@@ -17,6 +21,12 @@ export const requireAdmin: RequestHandler = async (req, res, next) => {
 
   if (!user) {
     res.status(401).json({ message: "Not authenticated" });
+    return;
+  }
+
+  if (user.role === "architect") {
+    // The architect role is always an admin — no grant lookup needed.
+    next();
     return;
   }
 

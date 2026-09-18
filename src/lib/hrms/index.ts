@@ -124,22 +124,97 @@ export async function getOrgTree(
         .where(and(eq(admins.orgId, orgId), isNull(admins.revokedAt))),
     ]);
 
+  const viewerRow = viewerUserId
+    ? (userRows.find((u) => u.id === viewerUserId) ?? null)
+    : null;
+  const adminUserIds = new Set(adminRows.map((a) => a.userId));
+
   const userByExternalId = new Map(
     userRows
       .filter((u) => u.externalHrmsId)
       .map((u) => [u.externalHrmsId!, u] as const),
   );
   const pendingInviteUserIds = new Set(inviteRows.map((i) => i.targetUserId));
-  const adminUserIds = new Set(adminRows.map((a) => a.userId));
+
+  // Admin access is composite: an active org_admins grant OR role=architect.
+  const isEffectiveAdmin = (u: { id: string; role: string } | null) =>
+    !!u && (u.role === "architect" || adminUserIds.has(u.id));
+
+  // -------------------------------------------------------------------------
+  // RBAC visibility scope (§6 of the Technical Specification):
+  //  - Architects and active org admins see the whole org.
+  //  - Everyone else sees only their own reporting subtree (self + all
+  //    descendants via the current reporting edges).
+  //  - A viewer that cannot be placed in the org graph (no HRMS record) sees
+  //    an empty tree rather than leaking org-wide data.
+  // -------------------------------------------------------------------------
+  let visibleUserIds: Set<string> | null = null;
+
+  if (
+    viewerRow &&
+    viewerUserId &&
+    !(viewerRow.role === "architect" || adminUserIds.has(viewerUserId))
+  ) {
+    if (!viewerRow.externalHrmsId) {
+      visibleUserIds = new Set();
+    } else {
+      // BFS down the reporting graph from the viewer.
+      const descendants = new Set<string>([viewerUserId]);
+      const queue = [viewerUserId];
+      while (queue.length > 0) {
+        const managerId = queue.pop()!;
+        for (const edge of edgeRows) {
+          if (edge.managerUserId !== managerId) continue;
+          if (descendants.has(edge.reportUserId)) continue;
+          descendants.add(edge.reportUserId);
+          queue.push(edge.reportUserId);
+        }
+      }
+      visibleUserIds = descendants;
+    }
+  }
+
+  let staffSlice = staff;
+  let teamRowsSlice = teamRows;
+  let edgeRowsSlice = edgeRows;
+  let userRowsSlice = userRows;
+
+  if (visibleUserIds) {
+    const visibleExternalIds = new Set(
+      userRowsSlice
+        .filter((u) => u.id && visibleUserIds!.has(u.id) && u.externalHrmsId)
+        .map((u) => u.externalHrmsId!),
+    );
+
+    staffSlice = staff.filter(
+      (e) => e.externalHrmsId && visibleExternalIds.has(e.externalHrmsId),
+    );
+
+    const visibleTeamIds = new Set(
+      staffSlice.map((e) => e.teamId).filter((t): t is string => !!t),
+    );
+    teamRowsSlice = teamRows.filter((t) => visibleTeamIds.has(t.id));
+
+    edgeRowsSlice = edgeRows.filter(
+      (e) =>
+        visibleUserIds!.has(e.managerUserId) &&
+        visibleUserIds!.has(e.reportUserId),
+    );
+
+    userRowsSlice = userRows.filter((u) => {
+      if (!u.externalHrmsId) return false;
+      return visibleExternalIds.has(u.externalHrmsId);
+    });
+  }
 
   const userRolesById = Object.fromEntries(
-    userRows
+    userRowsSlice
       .filter((u) => u.externalHrmsId)
       .map((u) => [u.externalHrmsId!, u.role]),
   );
 
   return {
-    employees: staff.map((e) => {
+    employees: staffSlice.map((e) => {
       const user = e.externalHrmsId
         ? (userByExternalId.get(e.externalHrmsId) ?? null)
         : null;
@@ -161,21 +236,21 @@ export async function getOrgTree(
         userId: user?.id ?? null,
         userStatus: user?.status ?? null,
         hasPendingInvite: user ? pendingInviteUserIds.has(user.id) : false,
-        isAdmin: user ? adminUserIds.has(user.id) : false,
+        isAdmin: user ? isEffectiveAdmin(user) : false,
       };
     }),
-    teams: teamRows.map((t) => ({
+    teams: teamRowsSlice.map((t) => ({
       id: t.id,
       name: t.name,
       parentTeamId: t.parentTeamId,
       hrmsDepartment: t.hrmsDepartment,
     })),
-    reportingEdges: edgeRows.map((e) => ({
+    reportingEdges: edgeRowsSlice.map((e) => ({
       managerUserId: e.managerUserId,
       reportUserId: e.reportUserId,
       validTo: e.validTo,
     })),
     userRolesById,
-    viewerIsAdmin: viewerUserId ? adminUserIds.has(viewerUserId) : false,
+    viewerIsAdmin: viewerRow ? isEffectiveAdmin(viewerRow) : false,
   };
 }
