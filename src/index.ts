@@ -4,7 +4,9 @@ import cors from "cors";
 import express, { type Request, type Response } from "express";
 
 import { adminsRouter } from "./routes/admins.js";
+import { aiRouter } from "./routes/ai.js";
 import { authRouter } from "./routes/auth.js";
+import { drillsRouter } from "./routes/drills.js";
 import { hrmsRouter } from "./routes/hrms.js";
 import { invitesRouter } from "./routes/invites.js";
 import { orgsRouter } from "./routes/orgs.js";
@@ -49,6 +51,8 @@ app.use("/api/invites", invitesRouter);
 app.use("/api/admins", adminsRouter);
 app.use("/api/verify", verifyRouter);
 app.use("/api/profile", profileRouter);
+app.use("/api/ai", aiRouter);
+app.use("/api/drills", drillsRouter);
 
 // ---------------------------------------------------------------------------
 // Listen

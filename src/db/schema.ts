@@ -9,3 +9,5 @@ export * from "./emailVerificationGrants.js";
 export * from "./employees.js";
 export * from "./hrmsConnections.js";
 export * from "./reportingEdges.js";
+export * from "./drills.js";
+export * from "./courseDocuments.js";
