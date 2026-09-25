@@ -207,3 +207,52 @@ export async function generateFaqSuggestions(input: {
   }
   return out;
 }
+
+/**
+ * Structured digest of a daily check-in call transcript. Produces
+ * { report, suggestions, updates } straight from the spoken text. Returns
+ * null when no LLM provider is configured or the output can't be parsed.
+ */
+export async function generateCheckinSummary(
+  transcript: string,
+): Promise<{ report: string; suggestions: string; updates: string } | null> {
+  const client = getAiClient();
+  if (!client) return null;
+
+  const text = truncate(transcript.trim(), 12_000);
+  if (text.length < 3) return null;
+
+  const completion = await client.chat.completions.create({
+    model: AI_MODEL,
+    response_format: { type: "json_object" },
+    messages: [
+      {
+        role: "system",
+        content:
+          "You summarise short daily voice check-in calls between a manager and one of their reports. " +
+          "The call collects three things. Reply ONLY with JSON of the form " +
+          '{"report": "<status of the report>", "suggestions": "<suggestions, or empty>", "updates": "<updates or blockers, or empty>"}. ' +
+          "Write the manager-facing summary in clear, concise English. Use empty strings when nothing was said for a section. " +
+          "Never invent facts not present in the transcript.",
+      },
+      {
+        role: "user",
+        content: `Transcript of the check-in call:\n${text}`,
+      },
+    ],
+  });
+
+  const parsed = extractJsonObject(completion.choices[0]?.message?.content);
+  if (!parsed) return null;
+
+  const asText = (v: unknown) =>
+    (typeof v === "string" ? v.trim() : "").slice(0, 2000);
+
+  const report = asText(parsed["report"]);
+  const suggestions = asText(parsed["suggestions"]);
+  const updates = asText(parsed["updates"]);
+
+  if (!report && !suggestions && !updates) return null;
+
+  return { report, suggestions, updates };
+}

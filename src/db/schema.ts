@@ -11,3 +11,5 @@ export * from "./hrmsConnections.js";
 export * from "./reportingEdges.js";
 export * from "./drills.js";
 export * from "./courseDocuments.js";
+export * from "./telenow.js";
+export * from "./dailyCheckins.js";

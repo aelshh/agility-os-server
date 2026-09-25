@@ -111,6 +111,7 @@ export async function getOrgTree(
           externalHrmsId: users.externalHrmsId,
           role: users.role,
           status: users.status,
+          phone: users.phone,
         })
         .from(users)
         .where(eq(users.orgId, orgId)),
@@ -224,7 +225,7 @@ export async function getOrgTree(
         externalManagerId: e.externalManagerId,
         name: e.name,
         email: e.email,
-        phone: e.phone,
+        phone: user?.phone ?? e.phone,
         designation: e.designation,
         department: e.department,
         region: e.region,
