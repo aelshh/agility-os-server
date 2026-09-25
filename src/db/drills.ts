@@ -24,6 +24,21 @@ export const drillStatusEnum = pgEnum("drill_status", [
   "rejected",
 ]);
 
+/**
+ * Telenow provisioning state for a published course.
+ *
+ * none        -> not yet provisioned (draft/rejected, or not delivered)
+ * provisioning-> agent/campaign creation in flight
+ * completed   -> agent + campaign created (calls are being placed)
+ * failed      -> agent/campaign creation errored; retry via POST /:id/provision
+ */
+export const drillProvisioningEnum = pgEnum("drill_provisioning", [
+  "none",
+  "provisioning",
+  "completed",
+  "failed",
+]);
+
 // ---------------------------------------------------------------------------
 // Table
 // ---------------------------------------------------------------------------
@@ -82,6 +97,14 @@ export const drills = pgTable("drills", {
   reviewComment: text("review_comment"),
   reviewedAt: timestamp("reviewed_at", { withTimezone: true }),
   publishedAt: timestamp("published_at", { withTimezone: true }),
+
+  // Telenow delivery (provisioned when the course is approved/published)
+  telenowAgentId: varchar("telenow_agent_id", { length: 255 }),
+  telenowCampaignId: varchar("telenow_campaign_id", { length: 255 }),
+  provisioningStatus: drillProvisioningEnum("provisioning_status")
+    .notNull()
+    .default("none"),
+  provisioningError: text("provisioning_error"),
 
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()

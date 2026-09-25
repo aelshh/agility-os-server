@@ -19,6 +19,12 @@ export const orgs = pgTable("orgs", {
    * Typed loosely as JSONB — structured sub-types live in application code.
    */
   config: jsonb("config").default({}),
+  /** Organizational Telenow AI API Key (AES-256-GCM encrypted). */
+  telenowApiKey: text("telenow_api_key"),
+  /** Telenow workspace org ID resolved from the API key. */
+  telenowOrgId: varchar("telenow_org_id", { length: 255 }),
+  /** Timestamp when Telenow API key was validated and connected. */
+  telenowConnectedAt: timestamp("telenow_connected_at", { withTimezone: true }),
   isActive: boolean("is_active").notNull().default(true),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
@@ -32,11 +38,14 @@ export const orgs = pgTable("orgs", {
 export type OrgRow = typeof orgs.$inferSelect;
 export type NewOrg = typeof orgs.$inferInsert;
 
-/** Publicly safe org fields (no internal config blob). */
+/** Publicly safe org fields (no internal config blob or raw API keys). */
 export type PublicOrg = Pick<
   OrgRow,
   "id" | "name" | "timezone" | "language" | "defaultRegion"
->;
+> & {
+  telenowConfigured: boolean;
+  telenowConnectedAt: Date | null;
+};
 
 export function toPublicOrg(org: OrgRow): PublicOrg {
   return {
@@ -45,5 +54,7 @@ export function toPublicOrg(org: OrgRow): PublicOrg {
     timezone: org.timezone,
     language: org.language,
     defaultRegion: org.defaultRegion,
+    telenowConfigured: Boolean(org.telenowApiKey && org.telenowApiKey.length > 0),
+    telenowConnectedAt: org.telenowConnectedAt ?? null,
   };
 }
