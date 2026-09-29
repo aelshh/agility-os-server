@@ -80,6 +80,21 @@ export const dailyCheckinSchedules = pgTable(
     /** Telenow agent created once per schedule and reused for every run. */
     telenowAgentId: varchar("telenow_agent_id", { length: 255 }),
 
+    /** Voice persona ID (ElevenLabs voice ID or provider voice ID). */
+    voice: varchar("voice", { length: 255 }).notNull().default("EXAVITQu4vr4xnSDxMaL"),
+
+    /** Voice TTS provider (e.g. elevenlabs, cartesia, openai). */
+    voiceProvider: varchar("voice_provider", { length: 50 }).notNull().default("elevenlabs"),
+
+    /** Phone number ID from Telenow voice numbers pool for inbound/outbound calls. */
+    phoneNumberId: varchar("phone_number_id", { length: 255 }),
+
+    /** Phone number in E.164 format (e.g. +918031138113) for display and caller ID. */
+    phoneNumber: varchar("phone_number", { length: 50 }),
+
+    /** Manually added targets beyond direct reports (array of user IDs) */
+    additionalUserIds: jsonb("additional_user_ids").$type<string[]>().notNull().default([]),
+
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),

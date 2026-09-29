@@ -111,7 +111,8 @@ export async function generateCoachPersona(input: {
           "Produce one persona for one training course. Reply ONLY with JSON of the form " +
           '{"name": "<short coach name, <=25 chars>", "prompt": "<coach system prompt>"}. ' +
           "The prompt is written as instructions addressed to the coach: it states the role, " +
-          "tone, language, the exact questions to ask the learner, and the call flow.",
+          "tone, language, the exact questions to ask the learner, and the call flow. " +
+          "CRITICAL INSTRUCTION: The call flow MUST dictate that the coach's VERY FIRST message is a greeting where they identify themselves as the user's practice coach and ask if the user is ready to begin (NEVER ask 'how can I assist you today'). Once the user confirms, the coach MUST first teach the concepts from the reference material, and ONLY start asking questions after teaching is complete.",
       },
       {
         role: "user",

@@ -57,6 +57,7 @@ export type DirectReportTarget = {
 export async function resolveDirectReports(
   orgId: string,
   managerUserId: string,
+  additionalUserIds: string[] = [],
 ): Promise<DirectReportTarget[]> {
   const edges = await db
     .select({ reportUserId: reportingEdges.reportUserId })
@@ -69,9 +70,9 @@ export async function resolveDirectReports(
       ),
     );
 
-  if (edges.length === 0) return [];
+  const reportIds = [...new Set([...edges.map((e) => e.reportUserId), ...additionalUserIds])];
+  if (reportIds.length === 0) return [];
 
-  const reportIds = [...new Set(edges.map((e) => e.reportUserId))];
   const rows = await db
     .select({ id: users.id, name: users.name, phone: users.phone, status: users.status })
     .from(users)
@@ -98,12 +99,10 @@ export function isCallable(target: DirectReportTarget): boolean {
 // ---------------------------------------------------------------------------
 
 const DEFAULT_SCRIPT =
-  "You are running a short daily voice check-in for a manager called {{scheduler_name}}. " +
-  "Call the report and lead a brief, friendly spoken conversation. Collect three things:\n" +
-  "1) Report — their status and what happened since the last check-in.\n" +
-  "2) Suggestions — anything they would suggest improving.\n" +
-  "3) Updates — any other updates or blockers worth the manager knowing.\n" +
-  "Keep the call under 3 minutes, ask follow-ups only when the answer is vague, and close warmly.";
+  "1. What have you worked on since our last check-in?\n" +
+  "2. What are your main priorities for today?\n" +
+  "3. Are you facing any blockers or need support from the team?\n" +
+  "4. Do you have any suggestions or feedback to share?";
 
 /** Exposed so the client can prefill the editable script box. */
 export { DEFAULT_SCRIPT };
@@ -112,12 +111,32 @@ function buildCheckinSystemPrompt(
   schedule: DailyCheckinScheduleRow,
   schedulerName: string,
 ): string {
-  const script = schedule.questionScript?.trim() || DEFAULT_SCRIPT;
+  const managerName = schedulerName || "your manager";
+  const title = schedule.title || "Daily check-in";
+  const rawScript = schedule.questionScript?.trim() || DEFAULT_SCRIPT;
+
+  // Support legacy prompt format if present
+  if (rawScript.includes("You are running a short daily voice check-in")) {
+    return (
+      rawScript
+        .replaceAll("{{scheduler_name}}", managerName)
+        .replaceAll("{{schedule_title}}", title) +
+      "\n\nCall the person who dialed in and collect their spoken update. Do not score the caller harshly — this is an update gathering call, not an assessment."
+    );
+  }
+
+  // Construct structured agent prompt around manager's questions
   return (
-    script
-      .replaceAll("{{scheduler_name}}", schedulerName || "your manager")
-      .replaceAll("{{schedule_title}}", schedule.title || "Daily check-in") +
-    "\n\nCall the person who dialed in and collect their spoken update. Do not score the caller harshly — this is an update gathering call, not an assessment."
+    `You are an automated voice assistant conducting a friendly daily check-in on behalf of ${managerName} for "${title}".\n\n` +
+    `Your role is to ask the employee the following check-in questions in a warm, professional, conversational manner:\n\n` +
+    `${rawScript}\n\n` +
+    `Guidelines for the call:\n` +
+    `- Greet the employee warmly and state that you are collecting their quick daily update for ${managerName}.\n` +
+    `- Ask each question one at a time and listen attentively to their response.\n` +
+    `- Ask brief follow-ups only if an answer is ambiguous or unclear.\n` +
+    `- Keep the entire call focused and brief (under 3 minutes).\n` +
+    `- Conclude the call pleasantly and thank them for their time.\n` +
+    `- Summarize their answers accurately without grading or evaluating them — this is an informational update, not a test.`
   );
 }
 
@@ -140,6 +159,9 @@ async function getOrCreateCheckinAgent(
     name: `Check-in: ${schedule.title}`,
     systemPrompt: buildCheckinSystemPrompt(schedule, schedulerName),
     maxDurationSec: CHECKIN_CALL_SECONDS,
+    ttsVoice: schedule.voice ?? undefined,
+    ttsProvider: schedule.voiceProvider ?? undefined,
+    opener: `Hi there! This is your daily voice check-in for ${schedulerName || "your manager"}. Do you have a couple minutes for a quick status update?`,
     qaCriteria: [
       { key: "report_given", description: "Did the report give a status update?" },
       { key: "suggestions_given", description: "Did the report share suggestions?" },
@@ -148,6 +170,17 @@ async function getOrCreateCheckinAgent(
     // Idempotency namespace — not a course, so any stable string works.
     courseId: `checkin-${schedule.id}`,
   });
+
+  if (schedule.phoneNumberId) {
+    try {
+      await client.assignNumberAgent(schedule.phoneNumberId, agentId);
+    } catch (err) {
+      console.warn(
+        `[checkins] Failed to assign phone number ${schedule.phoneNumberId} to agent ${agentId}:`,
+        err,
+      );
+    }
+  }
 
   await db
     .update(dailyCheckinSchedules)
@@ -166,8 +199,9 @@ async function snapshotTargetsIntoRun(input: {
   orgId: string;
   scheduleId: string;
   ownerUserId: string;
+  additionalUserIds?: string[];
 }): Promise<{ pending: number; skipped: number }> {
-  const targets = await resolveDirectReports(input.orgId, input.ownerUserId);
+  const targets = await resolveDirectReports(input.orgId, input.ownerUserId, input.additionalUserIds ?? []);
 
   if (targets.length === 0) return { pending: 0, skipped: 0 };
 
@@ -247,6 +281,7 @@ export async function provisionDailyCheckinRun(runId: string): Promise<{
       orgId: run.orgId,
       scheduleId: run.scheduleId,
       ownerUserId: schedule.ownerUserId,
+      additionalUserIds: schedule.additionalUserIds ?? [],
     });
 
     if (pending === 0) {
@@ -314,6 +349,9 @@ export async function provisionDailyCheckinRun(runId: string): Promise<{
       timezone: org.timezone,
       targets,
       source: `agilityos-checkin-${schedule.id}`,
+      startTimeLocal: "",
+      endTimeLocal: "",
+      fromNumberId: schedule.phoneNumberId ?? undefined,
     });
 
     await db

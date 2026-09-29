@@ -7,7 +7,7 @@
  * recordings are never exposed — the run endpoint strips `recordingUrl`.
  */
 
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray, ne } from "drizzle-orm";
 import {
   Router,
   type Request,
@@ -33,7 +33,7 @@ import {
   resolveDirectReports,
 } from "../lib/dailyCheckins.js";
 import { isValidTimeLabel, zonedNow } from "../lib/timezone.js";
-import { isOrgTelenowConfigured } from "../lib/telenow.js";
+import { isOrgTelenowConfigured, getTelenowClientForOrg, getAvailableVoices } from "../lib/telenow.js";
 import { requireAuth } from "../middleware/requireAuth.js";
 
 const router = Router();
@@ -74,6 +74,11 @@ const createScheduleSchema = z.object({
     .trim()
     .max(4000, "Call script cannot exceed 4000 characters")
     .optional(),
+  voice: z.string().trim().max(255).optional(),
+  voiceProvider: z.string().trim().max(50).optional(),
+  phoneNumberId: z.string().trim().max(255).nullable().optional(),
+  phoneNumber: z.string().trim().max(50).nullable().optional(),
+  additionalUserIds: z.array(z.string().uuid()).optional(),
 });
 
 const updateScheduleSchema = z.object({
@@ -93,7 +98,12 @@ const updateScheduleSchema = z.object({
     .trim()
     .max(4000, "Call script cannot exceed 4000 characters")
     .optional(),
+  voice: z.string().trim().max(255).optional(),
+  voiceProvider: z.string().trim().max(50).optional(),
+  phoneNumberId: z.string().trim().max(255).nullable().optional(),
+  phoneNumber: z.string().trim().max(50).nullable().optional(),
   enabled: z.boolean().optional(),
+  additionalUserIds: z.array(z.string().uuid()).optional(),
 });
 
 // ---------------------------------------------------------------------------
@@ -107,7 +117,7 @@ function isOwner(schedule: { ownerUserId: string }, user: PublicUser): boolean {
 async function schedulePublicView(
   schedule: typeof dailyCheckinSchedules.$inferSelect,
 ): Promise<Record<string, unknown>> {
-  const targets = await resolveDirectReports(schedule.orgId, schedule.ownerUserId);
+  const targets = await resolveDirectReports(schedule.orgId, schedule.ownerUserId, (schedule.additionalUserIds as string[]) ?? []);
   return {
     ...schedule,
     questionScript: schedule.questionScript ?? DEFAULT_SCRIPT,
@@ -225,6 +235,25 @@ router.get("/schedule", authNonPractitioner, async (req: Request, res: Response)
 });
 
 // ---------------------------------------------------------------------------
+// GET /api/checkins/voices — List available voices for check-ins
+// ---------------------------------------------------------------------------
+
+router.get("/voices", authNonPractitioner, async (req: Request, res: Response) => {
+  const user = req.user!;
+  try {
+    const provider =
+      typeof req.query["provider"] === "string"
+        ? req.query["provider"]
+        : "elevenlabs";
+    const voices = await getAvailableVoices(user.orgId ?? undefined, provider);
+    res.status(200).json({ voices });
+  } catch (err) {
+    console.error("[checkins] GET /voices failed", err);
+    res.status(500).json({ message: "Failed to load voices." });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // POST /api/checkins/schedule — create
 // ---------------------------------------------------------------------------
 
@@ -263,6 +292,11 @@ router.post("/schedule", authNonPractitioner, async (req: Request, res: Response
         title: result.data.title,
         timeLocal: result.data.timeLocal,
         questionScript: result.data.questionScript?.trim() || null,
+        voice: result.data.voice ?? undefined,
+        voiceProvider: result.data.voiceProvider ?? undefined,
+        phoneNumberId: result.data.phoneNumberId ?? null,
+        phoneNumber: result.data.phoneNumber ?? null,
+        additionalUserIds: result.data.additionalUserIds ?? [],
       })
       .returning();
 
@@ -313,6 +347,48 @@ router.put("/schedule/:id", authNonPractitioner, async (req: Request, res: Respo
     if (data.questionScript !== undefined)
       patch.questionScript = data.questionScript.trim() || null;
     if (data.enabled !== undefined) patch.enabled = data.enabled;
+    if (data.additionalUserIds !== undefined) patch.additionalUserIds = data.additionalUserIds;
+
+    // Handle voice / prompt changes: clear agent ID so fresh agent is provisioned with new voice/prompt
+    const voiceChanged = data.voice && data.voice !== schedule.voice;
+    const providerChanged = data.voiceProvider && data.voiceProvider !== schedule.voiceProvider;
+    const scriptChanged =
+      data.questionScript !== undefined &&
+      data.questionScript.trim() !== (schedule.questionScript ?? "");
+
+    if (data.voice !== undefined) patch.voice = data.voice;
+    if (data.voiceProvider !== undefined) patch.voiceProvider = data.voiceProvider;
+
+    if (schedule.telenowAgentId && (voiceChanged || providerChanged || scriptChanged)) {
+      try {
+        const { client } = await getTelenowClientForOrg(user.orgId!);
+        await client.deleteAgent(schedule.telenowAgentId).catch(() => {});
+      } catch (err) {
+        console.warn("[checkins] error clearing old agent on voice/script update", err);
+      }
+      patch.telenowAgentId = null;
+    }
+
+    // Handle phone number change
+    if (data.phoneNumberId !== undefined && data.phoneNumberId !== schedule.phoneNumberId) {
+      patch.phoneNumberId = data.phoneNumberId || null;
+      patch.phoneNumber = data.phoneNumber || null;
+
+      try {
+        const { client } = await getTelenowClientForOrg(user.orgId!);
+        // Unassign old number if was assigned
+        if (schedule.phoneNumberId) {
+          await client.unassignNumberAgent(schedule.phoneNumberId).catch(() => {});
+        }
+        // Assign new number to active agent if agent exists
+        const activeAgentId = patch.telenowAgentId ?? schedule.telenowAgentId;
+        if (activeAgentId && data.phoneNumberId) {
+          await client.assignNumberAgent(data.phoneNumberId, activeAgentId).catch(() => {});
+        }
+      } catch (err) {
+        console.warn("[checkins] error updating phone number assignment on Telenow", err);
+      }
+    }
 
     const [updated] = await db
       .update(dailyCheckinSchedules)
@@ -500,6 +576,67 @@ router.get("/runs/:id", authNonPractitioner, async (req: Request, res: Response)
   } catch (err) {
     console.error("[checkins] GET run detail failed", err);
     res.status(500).json({ message: "Something went wrong. Please try again." });
+  }
+});
+
+
+// ---------------------------------------------------------------------------
+// DELETE /schedule/:id — delete my schedule and its Telenow resources
+// ---------------------------------------------------------------------------
+
+router.delete("/schedule/:id", authNonPractitioner, async (req: Request, res: Response) => {
+  const user = req.user!;
+
+  try {
+    const schedule = await loadOwnSchedule(req.params["id"] as string, user);
+    if (!schedule) {
+      res.status(404).json({ message: "Schedule not found." });
+      return;
+    }
+
+    if (schedule.telenowAgentId) {
+      try {
+        const { client } = await getTelenowClientForOrg(user.orgId!);
+        
+        // Fetch runs that might have active campaigns
+        const runs = await db
+          .select({ telenowCampaignId: dailyCheckinRuns.telenowCampaignId })
+          .from(dailyCheckinRuns)
+          .where(and(
+            eq(dailyCheckinRuns.scheduleId, schedule.id),
+            ne(dailyCheckinRuns.status, "completed"),
+            ne(dailyCheckinRuns.status, "failed"),
+            ne(dailyCheckinRuns.status, "skipped")
+          ));
+
+        for (const run of runs) {
+          if (run.telenowCampaignId) {
+            await client.deleteCampaign(run.telenowCampaignId).catch((err) => {
+              console.warn(`[checkins] failed to clean up campaign ${run.telenowCampaignId}`, err);
+            });
+          }
+        }
+
+        if (schedule.phoneNumberId) {
+          await client.unassignNumberAgent(schedule.phoneNumberId).catch((err) => {
+            console.warn(`[checkins] failed to unassign number ${schedule.phoneNumberId}`, err);
+          });
+        }
+
+        await client.deleteAgent(schedule.telenowAgentId).catch((err) => {
+          console.warn(`[checkins] failed to clean up agent ${schedule.telenowAgentId}`, err);
+        });
+      } catch (err) {
+        console.warn("[checkins] could not connect to Telenow for cleanup", err);
+      }
+    }
+
+    await db.delete(dailyCheckinSchedules).where(eq(dailyCheckinSchedules.id, schedule.id));
+
+    res.status(200).json({ message: "Schedule deleted." });
+  } catch (err) {
+    console.error("[checkins] DELETE /schedule/:id failed", err);
+    res.status(500).json({ message: "Something went wrong deleting the schedule." });
   }
 });
 
