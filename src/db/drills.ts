@@ -81,6 +81,8 @@ export const drills = pgTable("drills", {
 
   // Delivery configuration
   maxDurationSec: integer("max_duration_sec").notNull().default(120),
+  callWindowStart: varchar("call_window_start", { length: 5 }),
+  callWindowEnd: varchar("call_window_end", { length: 5 }),
   isMandatory: boolean("is_mandatory").notNull().default(false),
   regionScope: text("region_scope").array().notNull().default([]),
   roleScope: text("role_scope").array().notNull().default([]),
@@ -98,9 +100,18 @@ export const drills = pgTable("drills", {
   reviewedAt: timestamp("reviewed_at", { withTimezone: true }),
   publishedAt: timestamp("published_at", { withTimezone: true }),
 
-  // Telenow delivery (provisioned when the course is approved/published)
+  // Telenow integration (knowledge base, voice, and provisioned delivery)
+  voice: varchar("voice", { length: 100 })
+    .notNull()
+    .default("EXAVITQu4vr4xnSDxMaL"),
+  voiceProvider: varchar("voice_provider", { length: 50 })
+    .notNull()
+    .default("elevenlabs"),
+  telenowKbId: varchar("telenow_kb_id", { length: 255 }),
   telenowAgentId: varchar("telenow_agent_id", { length: 255 }),
   telenowCampaignId: varchar("telenow_campaign_id", { length: 255 }),
+  phoneNumberId: varchar("phone_number_id", { length: 255 }),
+  phoneNumber: varchar("phone_number", { length: 50 }),
   provisioningStatus: drillProvisioningEnum("provisioning_status")
     .notNull()
     .default("none"),

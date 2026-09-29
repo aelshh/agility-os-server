@@ -233,23 +233,30 @@ function buildCoachSystemPrompt(drill: DrillRow, docs: CourseDocumentRow[]): str
     if (drill.description?.trim()) parts.push(drill.description.trim());
   }
 
-  const reference: string[] = [];
-  if (drill.knowledgeText && drill.knowledgeText.trim() !== "") {
-    reference.push(
-      `Course notes:\n${truncate(drill.knowledgeText.trim(), MAX_REFERENCE_CHARS)}`,
-    );
-  }
-  for (const doc of docs) {
-    if (!doc.textContent?.trim()) continue;
-    reference.push(
-      `Document "${doc.originalName}":\n${truncate(doc.textContent.trim(), MAX_DOC_CHARS)}`,
-    );
-  }
-  if (reference.length > 0) {
+  if (drill.telenowKbId) {
     parts.push(
-      "Reference material — ground every answer strictly in this and never invent facts outside it:\n" +
-        reference.join("\n\n---\n\n"),
+      "Knowledge Base Grounding:\n" +
+        "Ground every answer, explanation, and feedback strictly in the attached knowledge base. Never invent facts outside it. If the learner asks about a topic not covered in the knowledge base, state clearly and politely that it is not covered in this training.",
     );
+  } else {
+    const reference: string[] = [];
+    if (drill.knowledgeText && drill.knowledgeText.trim() !== "") {
+      reference.push(
+        `Course notes:\n${truncate(drill.knowledgeText.trim(), MAX_REFERENCE_CHARS)}`,
+      );
+    }
+    for (const doc of docs) {
+      if (!doc.textContent?.trim()) continue;
+      reference.push(
+        `Document "${doc.originalName}":\n${truncate(doc.textContent.trim(), MAX_DOC_CHARS)}`,
+      );
+    }
+    if (reference.length > 0) {
+      parts.push(
+        "Reference material — ground every answer strictly in this and never invent facts outside it:\n" +
+          reference.join("\n\n---\n\n"),
+      );
+    }
   }
 
   const faqs = asStringArray(drill.faqs);
@@ -319,7 +326,35 @@ export async function provisionCourseOnTelenow(input: {
         description: String(c["description"] ?? c["name"] ?? "").slice(0, 300),
       })),
       courseId: drill.id,
+      ttsVoice: drill.voice ?? undefined,
+      ttsProvider: drill.voiceProvider ?? undefined,
     });
+
+    // 2b. Attach Knowledge Base to agent if configured
+    if (drill.telenowKbId) {
+      await client.attachKnowledgeBase(
+        agentId,
+        drill.telenowKbId,
+        undefined,
+        org.telenowOrgId ?? undefined,
+      );
+    }
+
+    // 2c. Assign phone number to agent if configured
+    if (drill.phoneNumberId) {
+      try {
+        await client.assignNumberAgent(
+          drill.phoneNumberId,
+          agentId,
+          org.telenowOrgId ?? undefined,
+        );
+      } catch (numErr) {
+        console.warn(
+          `[provision] Failed to assign number ${drill.phoneNumberId} to agent ${agentId}:`,
+          numErr,
+        );
+      }
+    }
 
     // 3. Campaign — one target per pending enrollment, id = enrollment id so
     //    webhook correlation works without a session ledger.
@@ -359,13 +394,18 @@ export async function provisionCourseOnTelenow(input: {
         .filter((t): t is NonNullable<typeof t> => t !== null);
 
       if (targets.length > 0) {
-        campaignId = await client.createCampaign({
+        const campaignPayload: Parameters<typeof client.createCampaign>[0] = {
           name: `Training: ${drill.title}`,
           agentId,
           timezone: org.timezone,
           targets,
           source: `agilityos-course-${drill.id}`,
-        });
+        };
+        if (drill.callWindowStart) campaignPayload.startTimeLocal = drill.callWindowStart;
+        if (drill.callWindowEnd) campaignPayload.endTimeLocal = drill.callWindowEnd;
+        if (drill.phoneNumberId) campaignPayload.fromNumberId = drill.phoneNumberId;
+
+        campaignId = await client.createCampaign(campaignPayload);
       }
     }
 
