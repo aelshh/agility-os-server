@@ -15,6 +15,7 @@ import { orgIntegrationsRouter } from "./routes/integrations.js";
 import { profileRouter } from "./routes/profile.js";
 import { verifyRouter } from "./routes/verify.js";
 import { webhooksRouter } from "./routes/webhooks.js";
+import { callsRouter } from "./routes/calls.js";
 import { startDailyCheckinScheduler } from "./lib/checkinScheduler.js";
 
 const app = express();
@@ -64,6 +65,7 @@ app.use("/api/profile", profileRouter);
 app.use("/api/ai", aiRouter);
 app.use("/api/drills", drillsRouter);
 app.use("/api/checkins", checkinsRouter);
+app.use("/api/calls", callsRouter);
 
 // ---------------------------------------------------------------------------
 // Listen

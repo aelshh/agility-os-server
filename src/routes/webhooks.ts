@@ -124,6 +124,9 @@ router.post(
     }
 
     // -- Replay window ------------------------------------------------------
+    console.log("[Webhook] Received event:", payload["event"]);
+    console.log("[Webhook] Payload:", JSON.stringify(payload, null, 2));
+
     const occurredAtStr = asString(payload["occurredAt"]);
     if (occurredAtStr) {
       const occurredAt = new Date(occurredAtStr).getTime();
@@ -198,16 +201,124 @@ async function findEnrollment(
   return row ?? null;
 }
 
+function parseTranscript(
+  val: unknown,
+): Array<{ role: string; text: string; at?: string }> | null {
+  if (!Array.isArray(val)) return null;
+  const turns: Array<{ role: string; text: string; at?: string }> = [];
+  for (const item of val) {
+    if (item && typeof item === "object") {
+      const obj = item as Record<string, unknown>;
+      const role = typeof obj["role"] === "string" ? obj["role"] : "speaker";
+      const text = typeof obj["text"] === "string" ? obj["text"] : "";
+      const at = typeof obj["at"] === "string" ? obj["at"] : undefined;
+      if (text.trim().length > 0) {
+        if (at !== undefined) {
+          turns.push({ role, text, at });
+        } else {
+          turns.push({ role, text });
+        }
+      }
+    }
+  }
+  return turns.length > 0 ? turns : null;
+}
+
+function parseTalkRatio(val: unknown): {
+  agentWords: number;
+  customerWords: number;
+  agentTurns: number;
+  customerTurns: number;
+} | null {
+  const obj = asObj(val);
+  if (!obj) return null;
+  return {
+    agentWords: asNumber(obj["agentWords"]) ?? 0,
+    customerWords: asNumber(obj["customerWords"]) ?? 0,
+    agentTurns: asNumber(obj["agentTurns"]) ?? 0,
+    customerTurns: asNumber(obj["customerTurns"]) ?? 0,
+  };
+}
+
+function parseQaScorecard(
+  val: unknown,
+): Array<{ key: string; met: boolean; evidence: string }> | null {
+  if (!Array.isArray(val)) return null;
+  const list: Array<{ key: string; met: boolean; evidence: string }> = [];
+  for (const item of val) {
+    if (item && typeof item === "object") {
+      const obj = item as Record<string, unknown>;
+      const key =
+        typeof obj["key"] === "string"
+          ? obj["key"]
+          : typeof obj["name"] === "string"
+            ? obj["name"]
+            : "Criterion";
+      const met = Boolean(obj["met"] ?? obj["passed"] ?? obj["result"]);
+      const evidence =
+        typeof obj["evidence"] === "string"
+          ? obj["evidence"]
+          : typeof obj["quote"] === "string"
+            ? obj["quote"]
+            : "";
+      list.push({ key, met, evidence });
+    }
+  }
+  return list.length > 0 ? list : null;
+}
+
+function parseCoachingTips(
+  val: unknown,
+): Array<{ issue: string; suggestion: string; severity: "low" | "medium" | "high" }> | null {
+  if (!Array.isArray(val)) return null;
+  const list: Array<{
+    issue: string;
+    suggestion: string;
+    severity: "low" | "medium" | "high";
+  }> = [];
+  for (const item of val) {
+    if (item && typeof item === "object") {
+      const obj = item as Record<string, unknown>;
+      const issue =
+        typeof obj["issue"] === "string"
+          ? obj["issue"]
+          : typeof obj["feedback"] === "string"
+            ? obj["feedback"]
+            : "";
+      const suggestion =
+        typeof obj["suggestion"] === "string"
+          ? obj["suggestion"]
+          : typeof obj["action"] === "string"
+            ? obj["action"]
+            : "";
+      const rawSev =
+        typeof obj["severity"] === "string"
+          ? obj["severity"].toLowerCase()
+          : "medium";
+      const severity: "low" | "medium" | "high" =
+        rawSev === "high" || rawSev === "low" ? rawSev : "medium";
+      if (issue.length > 0 || suggestion.length > 0) {
+        list.push({ issue, suggestion, severity });
+      }
+    }
+  }
+  return list.length > 0 ? list : null;
+}
+
+function parseStringArray(val: unknown): string[] | null {
+  if (!Array.isArray(val)) return null;
+  const list = val.filter(
+    (item): item is string => typeof item === "string" && item.trim().length > 0,
+  );
+  return list.length > 0 ? list : null;
+}
+
 async function handleCallEnded(
   payload: Record<string, unknown>,
   orgId?: string | null,
 ): Promise<boolean> {
   const enrollment = await findEnrollment(payload, orgId);
   if (!enrollment) return false;
-
-  // Analysis may already have landed (ordering is not guaranteed) — never
-  // downgrade a `completed` run.
-  if (enrollment.status === "completed") return true;
 
   const occurredAtRaw = asString(payload["occurredAt"]);
   const occurredAt = occurredAtRaw ? new Date(occurredAtRaw) : new Date();
@@ -221,12 +332,20 @@ async function handleCallEnded(
   const connected = answeredBy === "human" || durationSecs > 0;
   const nextStatus = connected ? "answered" : "no_answer";
 
-  const patch: EnrollmentUpdate = { status: nextStatus };
+  const patch: EnrollmentUpdate = {
+    durationSecs,
+  };
+  // If enrollment is not already completed, update status
+  if (enrollment.status !== "completed") {
+    patch.status = nextStatus;
+  }
   if (sessionId) patch.telenowSessionId = sessionId;
   if (recording) {
     const url = asString(recording["url"]);
     if (url) patch.recordingUrl = url;
   }
+  const transcript = parseTranscript(payload["transcript"]);
+  if (transcript) patch.transcript = transcript;
 
   await db
     .update(courseEnrollments)
@@ -246,13 +365,34 @@ async function handleCallAnalyzed(
   const enrollment = await findEnrollment(payload, orgId);
   if (!enrollment) return false;
 
-  const analysis = asObj(payload["analysis"]);
+  const analysis = asObj(payload["analysis"]) ?? payload;
   const scoreRaw = asNumber(analysis?.["score"]) ?? asNumber(payload["score"]);
   if (scoreRaw === null) return true; // no usable score — nothing to record
 
   const occurredAtRaw = asString(payload["occurredAt"]);
   const occurredAt = occurredAtRaw ? new Date(occurredAtRaw) : new Date();
   const sessionId = asString(payload["sessionId"]);
+  const recording = asObj(payload["recording"]);
+
+  const durationSecs =
+    asNumber(payload["durationSecs"]) ?? asNumber(analysis?.["durationSecs"]);
+  const summary = asString(analysis?.["summary"]);
+  const sentiment = asString(analysis?.["sentiment"]);
+  const sentimentScore = asNumber(analysis?.["sentimentScore"]);
+  const talkRatio = parseTalkRatio(analysis?.["talkRatio"]);
+  const qaScorecard =
+    parseQaScorecard(analysis?.["qa"]) ??
+    parseQaScorecard(analysis?.["qaScorecard"]);
+  const coachingTips =
+    parseCoachingTips(analysis?.["coaching"]) ??
+    parseCoachingTips(analysis?.["coachingTips"]);
+  const actionItems = parseStringArray(analysis?.["actionItems"]);
+  const objections = parseStringArray(analysis?.["objections"]);
+  const topics = parseStringArray(analysis?.["topics"]);
+  const latencyMetrics = asObj(analysis?.["latencyMetrics"]) as
+    | { avgResponseMs?: number; sttMs?: number; llmMs?: number; ttsMs?: number }
+    | null;
+  const transcript = parseTranscript(payload["transcript"]);
 
   const patch: EnrollmentUpdate = {
     status: "completed",
@@ -260,6 +400,22 @@ async function handleCallAnalyzed(
     completedAt: occurredAt,
   };
   if (sessionId) patch.telenowSessionId = sessionId;
+  if (durationSecs !== null) patch.durationSecs = durationSecs;
+  if (summary) patch.summary = summary;
+  if (sentiment) patch.sentiment = sentiment;
+  if (sentimentScore !== null) patch.sentimentScore = Math.round(sentimentScore * 100);
+  if (talkRatio) patch.talkRatio = talkRatio;
+  if (qaScorecard) patch.qaScorecard = qaScorecard;
+  if (coachingTips) patch.coachingTips = coachingTips;
+  if (actionItems) patch.actionItems = actionItems;
+  if (objections) patch.objections = objections;
+  if (topics) patch.topics = topics;
+  if (latencyMetrics) patch.latencyMetrics = latencyMetrics;
+  if (transcript) patch.transcript = transcript;
+  if (recording) {
+    const url = asString(recording["url"]);
+    if (url) patch.recordingUrl = url;
+  }
 
   await db
     .update(courseEnrollments)
@@ -327,6 +483,21 @@ async function handleCheckinCallEnded(
     if (url) patch.recordingUrl = url;
   }
 
+  // Summarize the spoken update when a transcript is available.
+  const transcriptArray = payload["transcript"];
+  if (Array.isArray(transcriptArray) && transcriptArray.length > 0) {
+    const lines = transcriptArray
+      .filter((t): t is { role: string; text: string } => 
+        typeof t === "object" && t !== null && typeof (t as any).role === "string" && typeof (t as any).text === "string"
+      )
+      .map((t) => `${t.role}: ${t.text}`);
+      
+    if (lines.length > 0) {
+      const summary = await generateCheckinSummary(lines.join("\n")).catch(() => null);
+      if (summary) patch.summary = summary;
+    }
+  }
+
   await db
     .update(dailyCheckins)
     .set({ ...patch, calledAt: occurredAt })
@@ -351,15 +522,6 @@ async function handleCheckinCallAnalyzed(
     completedAt: occurredAt,
   };
   if (sessionId) patch.telenowSessionId = sessionId;
-
-  // Summarize the spoken update when a transcript is available.
-  const analysis = asObj(payload["analysis"]);
-  const transcript =
-    asString(analysis?.["transcript"]) ?? asString(payload["transcript"]);
-  if (transcript) {
-    const summary = await generateCheckinSummary(transcript).catch(() => null);
-    if (summary) patch.summary = summary;
-  }
 
   await db
     .update(dailyCheckins)

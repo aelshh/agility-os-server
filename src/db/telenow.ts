@@ -1,6 +1,7 @@
 import {
   index,
   integer,
+  jsonb,
   pgEnum,
   pgTable,
   text,
@@ -96,11 +97,48 @@ export const courseEnrollments = pgTable(
     telenowSessionId: varchar("telenow_session_id", { length: 255 }),
     telenowCallId: varchar("telenow_call_id", { length: 255 }),
 
-    // Outcomes (hydrated by webhooks)
+    // Outcomes & Analytics (hydrated by webhooks)
     score: integer("score"),
+    durationSecs: integer("duration_secs"),
     transcriptUrl: text("transcript_url"),
     recordingUrl: text("recording_url"),
     error: text("error"),
+
+    transcript: jsonb("transcript").$type<
+      Array<{ role: string; text: string; at?: string }>
+    >(),
+    summary: text("summary"),
+    sentiment: varchar("sentiment", { length: 20 }),
+    sentimentScore: integer("sentiment_score"),
+    talkRatio: jsonb("talk_ratio").$type<{
+      agentWords: number;
+      customerWords: number;
+      agentTurns: number;
+      customerTurns: number;
+    }>(),
+    qaScorecard: jsonb("qa_scorecard").$type<
+      Array<{
+        key: string;
+        met: boolean;
+        evidence: string;
+      }>
+    >(),
+    coachingTips: jsonb("coaching_tips").$type<
+      Array<{
+        issue: string;
+        suggestion: string;
+        severity: "low" | "medium" | "high";
+      }>
+    >(),
+    actionItems: jsonb("action_items").$type<string[]>(),
+    objections: jsonb("objections").$type<string[]>(),
+    topics: jsonb("topics").$type<string[]>(),
+    latencyMetrics: jsonb("latency_metrics").$type<{
+      avgResponseMs?: number;
+      sttMs?: number;
+      llmMs?: number;
+      ttsMs?: number;
+    }>(),
 
     calledAt: timestamp("called_at", { withTimezone: true }),
     completedAt: timestamp("completed_at", { withTimezone: true }),

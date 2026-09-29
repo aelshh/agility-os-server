@@ -34,6 +34,7 @@ import { and, asc, eq, inArray, ne, or } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { Router } from "express";
 import { rateLimit } from "express-rate-limit";
+import JSZip from "jszip";
 import multer from "multer";
 import { z } from "zod";
 
@@ -56,7 +57,12 @@ import { aiEnabled } from "../lib/ai/client.js";
 import { handleDatabaseError } from "../lib/dbErrors.js";
 import { extractText } from "../lib/docs/extractText.js";
 import { provisionCourseOnTelenow, snapshotAudience, mergeAudience } from "../lib/provisionCourse.js";
-import { isOrgTelenowConfigured } from "../lib/telenow.js";
+import {
+  isOrgTelenowConfigured,
+  getTelenowClientForOrg,
+  getAvailableVoices,
+  TelenowClient,
+} from "../lib/telenow.js";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { requireRole } from "../middleware/requireRole.js";
 
@@ -86,7 +92,7 @@ const drillWriteLimiter = rateLimit({
 });
 
 /** Knowledge-dump uploads are parsed in-memory, extracted to text, then written to disk. */
-const DOC_UPLOAD_LIMIT = 10 * 1024 * 1024;
+const DOC_UPLOAD_LIMIT = 25 * 1024 * 1024;
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: DOC_UPLOAD_LIMIT, files: 1 },
@@ -134,6 +140,8 @@ const createDrillSchema = z.object({
       }
     }),
   maxDurationSec: z.number().int().min(10).max(3600).default(120),
+  callWindowStart: z.string().trim().regex(/^\d{2}:\d{2}$/, "Must be HH:MM").nullable().optional().default(null),
+  callWindowEnd: z.string().trim().regex(/^\d{2}:\d{2}$/, "Must be HH:MM").nullable().optional().default(null),
   isMandatory: z.boolean().default(false),
   regionScope: z.array(z.string().trim().min(1)).default([]),
   roleScope: z.array(z.string().trim().min(1)).default([]),
@@ -143,6 +151,11 @@ const createDrillSchema = z.object({
     .nullable()
     .optional()
     .default(null),
+  telenowKbId: z.string().trim().max(255).nullable().optional(),
+  voice: z.string().trim().max(100).optional().default("EXAVITQu4vr4xnSDxMaL"),
+  voiceProvider: z.string().trim().max(50).optional().default("elevenlabs"),
+  phoneNumberId: z.string().trim().max(255).nullable().optional(),
+  phoneNumber: z.string().trim().max(50).nullable().optional(),
   audienceIds: z
     .array(z.string().uuid("Invalid practitioner id."))
     .max(5000, "Too many practitioners.")
@@ -167,13 +180,20 @@ type PublicDrill = {
   personaGeneratedAt: Date | null;
   scoringRubric: unknown;
   maxDurationSec: number;
+  callWindowStart: string | null;
+  callWindowEnd: string | null;
   isMandatory: boolean;
   regionScope: string[];
   roleScope: string[];
   expiresAt: Date | null;
   status: (typeof STATUSES)[number];
+  voice: string;
+  voiceProvider: string;
+  telenowKbId: string | null;
   telenowAgentId: string | null;
   telenowCampaignId: string | null;
+  phoneNumberId: string | null;
+  phoneNumber: string | null;
   provisioningStatus: "none" | "provisioning" | "completed" | "failed";
   provisioningError: string | null;
   createdBy: string;
@@ -230,13 +250,20 @@ const drillBaseColumns = {
   personaGeneratedAt: drills.personaGeneratedAt,
   scoringRubric: drills.scoringRubric,
   maxDurationSec: drills.maxDurationSec,
+  callWindowStart: drills.callWindowStart,
+  callWindowEnd: drills.callWindowEnd,
   isMandatory: drills.isMandatory,
   regionScope: drills.regionScope,
   roleScope: drills.roleScope,
   expiresAt: drills.expiresAt,
   status: drills.status,
+  voice: drills.voice,
+  voiceProvider: drills.voiceProvider,
+  telenowKbId: drills.telenowKbId,
   telenowAgentId: drills.telenowAgentId,
   telenowCampaignId: drills.telenowCampaignId,
+  phoneNumberId: drills.phoneNumberId,
+  phoneNumber: drills.phoneNumber,
   provisioningStatus: drills.provisioningStatus,
   provisioningError: drills.provisioningError,
   createdBy: drills.createdBy,
@@ -261,13 +288,20 @@ function toPublicDrill(drill: DrillWithNames): PublicDrill {
     personaGeneratedAt: drill.personaGeneratedAt,
     scoringRubric: drill.scoringRubric,
     maxDurationSec: drill.maxDurationSec,
+    callWindowStart: drill.callWindowStart,
+    callWindowEnd: drill.callWindowEnd,
     isMandatory: drill.isMandatory,
     regionScope: drill.regionScope,
     roleScope: drill.roleScope,
     expiresAt: drill.expiresAt,
     status: drill.status,
+    voice: drill.voice ?? "EXAVITQu4vr4xnSDxMaL",
+    voiceProvider: drill.voiceProvider ?? "elevenlabs",
+    telenowKbId: drill.telenowKbId,
     telenowAgentId: drill.telenowAgentId,
     telenowCampaignId: drill.telenowCampaignId,
+    phoneNumberId: drill.phoneNumberId ?? null,
+    phoneNumber: drill.phoneNumber ?? null,
     provisioningStatus: drill.provisioningStatus,
     provisioningError: drill.provisioningError,
     createdBy: drill.createdBy,
@@ -461,12 +495,28 @@ async function generateAndPersistPersona(
     if (!aiEnabled) return drill;
     if (!force && drill.personaGeneratedAt) return drill;
 
-    const docs = await db
-      .select()
-      .from(courseDocuments)
-      .where(eq(courseDocuments.courseId, drill.id));
+    let docs: Array<{ originalName: string; textContent: string | null }> = [];
+    if (drill.telenowKbId) {
+      try {
+        const { client, telenowOrgId } = await getTelenowClientForOrg(orgId);
+        const kbDocs = await client.listKbDocuments(drill.telenowKbId, telenowOrgId);
+        docs = kbDocs.map((d) => ({
+          originalName: d.title,
+          textContent: d.body || d.title,
+        }));
+      } catch (e) {
+        console.warn("[drills] could not fetch KB docs for persona", e);
+      }
+    }
+    if (docs.length === 0) {
+      docs = await db
+        .select()
+        .from(courseDocuments)
+        .where(eq(courseDocuments.courseId, drill.id));
+    }
 
     const hasKnowledge =
+      Boolean(drill.telenowKbId) ||
       drill.knowledgeText.trim().length > 0 ||
       docs.some((doc) => (doc.textContent ?? "").trim().length > 0);
     if (!hasKnowledge) return drill;
@@ -497,6 +547,128 @@ async function generateAndPersistPersona(
     return drill;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Knowledge Bases (Telenow.ai workspace integration)
+// ---------------------------------------------------------------------------
+
+async function ensureCourseKnowledgeBase(
+  drill: Pick<DrillRow, "id" | "title" | "description" | "telenowKbId">,
+  client: TelenowClient,
+  telenowOrgId: string,
+): Promise<string> {
+  if (drill.telenowKbId) return drill.telenowKbId;
+  const kb = await client.createKnowledgeBase(
+    {
+      name: `Course: ${drill.title.slice(0, 90)}`,
+      description: drill.description ? drill.description.slice(0, 300) : undefined,
+    },
+    telenowOrgId,
+  );
+  await db
+    .update(drills)
+    .set({ telenowKbId: kb.id })
+    .where(eq(drills.id, drill.id));
+  return kb.id;
+}
+
+// GET /knowledge-bases — list knowledge bases in this organization's Telenow workspace
+router.get(
+  "/knowledge-bases",
+  requireAuth,
+  requireRole(...CREATOR_ROLES),
+  async (req, res) => {
+    const user = req.user;
+    if (!user || !user.orgId) {
+      res.status(401).json({ message: "Not authenticated" });
+      return;
+    }
+    try {
+      const isConfigured = await isOrgTelenowConfigured(user.orgId);
+      if (!isConfigured) {
+        res.status(200).json({ knowledgeBases: [], total: 0 });
+        return;
+      }
+      const { client, telenowOrgId } = await getTelenowClientForOrg(user.orgId);
+      const result = await client.listKnowledgeBases(telenowOrgId);
+      res.status(200).json(result);
+    } catch (err) {
+      console.error("[drills] GET /knowledge-bases error:", err);
+      res.status(500).json({ message: "Failed to list knowledge bases." });
+    }
+  },
+);
+
+// POST /knowledge-bases — create a new knowledge base in Telenow
+router.post(
+  "/knowledge-bases",
+  requireAuth,
+  requireRole(...CREATOR_ROLES),
+  drillWriteLimiter,
+  async (req, res) => {
+    const user = req.user;
+    if (!user || !user.orgId) {
+      res.status(401).json({ message: "Not authenticated" });
+      return;
+    }
+    const schema = z.object({
+      name: z.string().trim().min(1, "Name is required").max(100),
+      description: z.string().trim().max(1000).optional(),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ errors: parsed.error.flatten().fieldErrors });
+      return;
+    }
+    try {
+      const { client, telenowOrgId } = await getTelenowClientForOrg(user.orgId);
+      const kb = await client.createKnowledgeBase(parsed.data, telenowOrgId);
+      res.status(201).json({ knowledgeBase: kb });
+    } catch (err) {
+      console.error("[drills] POST /knowledge-bases error:", err);
+      res.status(500).json({ message: "Failed to create knowledge base." });
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
+// GET /voices — list available AI coach voices
+// ---------------------------------------------------------------------------
+
+let cachedVoices: { voices: unknown[]; timestamp: number } | null = null;
+const VOICES_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+router.get(
+  "/voices",
+  requireAuth,
+  requireRole(...CREATOR_ROLES),
+  async (req, res) => {
+    const user = req.user;
+    if (!user || !user.orgId) {
+      res.status(401).json({ message: "Not authenticated" });
+      return;
+    }
+
+    const now = Date.now();
+    if (cachedVoices && now - cachedVoices.timestamp < VOICES_CACHE_TTL_MS) {
+      res.status(200).json({ voices: cachedVoices.voices });
+      return;
+    }
+
+    try {
+      const provider =
+        typeof req.query["provider"] === "string"
+          ? req.query["provider"]
+          : "elevenlabs";
+      const voices = await getAvailableVoices(user.orgId, provider);
+      cachedVoices = { voices, timestamp: now };
+      res.status(200).json({ voices });
+    } catch (err) {
+      console.error("[drills] GET /voices error:", err);
+      res.status(500).json({ message: "Failed to load voices." });
+    }
+  },
+);
 
 // ---------------------------------------------------------------------------
 // GET / — list courses for the caller's org
@@ -673,6 +845,35 @@ router.post(
     const data = parsed.data;
 
     try {
+      const { client, telenowOrgId } = await getTelenowClientForOrg(user.orgId);
+      let kbId = data.telenowKbId?.trim() || null;
+      if (!kbId) {
+        try {
+          const kb = await client.createKnowledgeBase(
+            {
+              name: `Course: ${data.title.slice(0, 90)}`,
+              description: data.description ? data.description.slice(0, 300) : undefined,
+            },
+            telenowOrgId,
+          );
+          kbId = kb.id;
+        } catch (err) {
+          console.warn("[drills] could not auto-create Telenow KB on course creation", err);
+        }
+      }
+
+      if (data.phoneNumberId) {
+        await db
+          .update(drills)
+          .set({ phoneNumberId: null, phoneNumber: null })
+          .where(
+            and(
+              eq(drills.orgId, user.orgId),
+              eq(drills.phoneNumberId, data.phoneNumberId),
+            ),
+          );
+      }
+
       const [row] = await db
         .insert(drills)
         .values({
@@ -685,11 +886,18 @@ router.post(
           faqs: data.faqs,
           scoringRubric: data.scoringRubric,
           maxDurationSec: data.maxDurationSec,
+          callWindowStart: data.callWindowStart,
+          callWindowEnd: data.callWindowEnd,
           isMandatory: data.isMandatory,
           regionScope: data.regionScope,
           roleScope: data.roleScope,
           expiresAt: data.expiresAt ? new Date(data.expiresAt) : null,
           status: "draft",
+          voice: data.voice ?? "EXAVITQu4vr4xnSDxMaL",
+          voiceProvider: data.voiceProvider ?? "elevenlabs",
+          phoneNumberId: data.phoneNumberId || null,
+          phoneNumber: data.phoneNumber || null,
+          telenowKbId: kbId,
           createdBy: user.id,
         })
         .returning();
@@ -801,11 +1009,37 @@ router.put(
         patch.scoringRubric = data.scoringRubric;
       if (data.maxDurationSec !== undefined)
         patch.maxDurationSec = data.maxDurationSec;
+      if (data.callWindowStart !== undefined)
+        patch.callWindowStart = data.callWindowStart;
+      if (data.callWindowEnd !== undefined)
+        patch.callWindowEnd = data.callWindowEnd;
       if (data.isMandatory !== undefined) patch.isMandatory = data.isMandatory;
       if (data.regionScope !== undefined) patch.regionScope = data.regionScope;
       if (data.roleScope !== undefined) patch.roleScope = data.roleScope;
       if (data.expiresAt !== undefined)
         patch.expiresAt = data.expiresAt ? new Date(data.expiresAt) : null;
+      if (data.telenowKbId !== undefined)
+        patch.telenowKbId = data.telenowKbId || null;
+      if (data.voice !== undefined) patch.voice = data.voice;
+      if (data.voiceProvider !== undefined)
+        patch.voiceProvider = data.voiceProvider;
+      if (data.phoneNumberId !== undefined) {
+        patch.phoneNumberId = data.phoneNumberId || null;
+        patch.phoneNumber = data.phoneNumber || null;
+
+        if (data.phoneNumberId) {
+          await db
+            .update(drills)
+            .set({ phoneNumberId: null, phoneNumber: null })
+            .where(
+              and(
+                eq(drills.orgId, user.orgId),
+                eq(drills.phoneNumberId, data.phoneNumberId),
+                ne(drills.id, drillId),
+              ),
+            );
+        }
+      }
 
       // Editing the persona after an AI regeneration would silently override
       // it — lock down the practice run when the course already shipped.
@@ -1135,11 +1369,27 @@ router.get(
           userId: courseEnrollments.userId,
           userName: users.name,
           userPhone: users.phone,
+          userEmail: users.email,
+          userRole: users.role,
+          userRegion: users.region,
           status: courseEnrollments.status,
           score: courseEnrollments.score,
+          durationSecs: courseEnrollments.durationSecs,
           calledAt: courseEnrollments.calledAt,
           completedAt: courseEnrollments.completedAt,
           recordingUrl: courseEnrollments.recordingUrl,
+          transcriptUrl: courseEnrollments.transcriptUrl,
+          transcript: courseEnrollments.transcript,
+          summary: courseEnrollments.summary,
+          sentiment: courseEnrollments.sentiment,
+          sentimentScore: courseEnrollments.sentimentScore,
+          talkRatio: courseEnrollments.talkRatio,
+          qaScorecard: courseEnrollments.qaScorecard,
+          coachingTips: courseEnrollments.coachingTips,
+          actionItems: courseEnrollments.actionItems,
+          objections: courseEnrollments.objections,
+          topics: courseEnrollments.topics,
+          latencyMetrics: courseEnrollments.latencyMetrics,
         })
         .from(courseEnrollments)
         .leftJoin(users, eq(courseEnrollments.userId, users.id))
@@ -1157,11 +1407,27 @@ router.get(
           userId: r.userId,
           userName: r.userName,
           userPhone: r.userPhone,
+          userEmail: r.userEmail,
+          userRole: r.userRole,
+          userRegion: r.userRegion,
           status: r.status,
           score: r.score,
+          durationSecs: r.durationSecs,
           calledAt: r.calledAt,
           completedAt: r.completedAt,
           recordingUrl: r.recordingUrl,
+          transcriptUrl: r.transcriptUrl,
+          transcript: r.transcript,
+          summary: r.summary,
+          sentiment: r.sentiment,
+          sentimentScore: r.sentimentScore,
+          talkRatio: r.talkRatio,
+          qaScorecard: r.qaScorecard,
+          coachingTips: r.coachingTips,
+          actionItems: r.actionItems,
+          objections: r.objections,
+          topics: r.topics,
+          latencyMetrics: r.latencyMetrics,
         })),
       });
     } catch (err) {
@@ -1515,6 +1781,330 @@ router.post(
 );
 
 // ---------------------------------------------------------------------------
+// Course Knowledge Base documents (Telenow.ai)
+// ---------------------------------------------------------------------------
+
+// GET /:id/knowledge-base — fetch course KB info and list of embedded documents
+router.get(
+  "/:id/knowledge-base",
+  requireAuth,
+  requireRole(...CREATOR_ROLES),
+  async (req, res) => {
+    const user = req.user;
+    if (!user || !user.orgId) {
+      res.status(401).json({ message: "Not authenticated" });
+      return;
+    }
+    const drillId = req.params["id"] as string;
+    try {
+      const [drill] = await db
+        .select({
+          id: drills.id,
+          title: drills.title,
+          description: drills.description,
+          telenowKbId: drills.telenowKbId,
+          orgId: drills.orgId,
+        })
+        .from(drills)
+        .where(and(eq(drills.id, drillId), eq(drills.orgId, user.orgId)))
+        .limit(1);
+
+      if (!drill) {
+        res.status(404).json({ message: "Course not found." });
+        return;
+      }
+
+      const isConfigured = await isOrgTelenowConfigured(user.orgId);
+      if (!isConfigured) {
+        res.status(200).json({ knowledgeBase: null, documents: [] });
+        return;
+      }
+
+      const { client, telenowOrgId } = await getTelenowClientForOrg(user.orgId);
+      const kbId = await ensureCourseKnowledgeBase(drill, client, telenowOrgId);
+      const docs = await client.listKbDocuments(kbId, telenowOrgId);
+      res.status(200).json({
+        knowledgeBase: { id: kbId, title: drill.title },
+        documents: docs,
+      });
+    } catch (err) {
+      console.error("[drills] GET /:id/knowledge-base error:", err);
+      res.status(500).json({ message: "Failed to fetch knowledge base documents." });
+    }
+  },
+);
+
+// POST /:id/knowledge-base/documents/text — add an inline text document
+router.post(
+  "/:id/knowledge-base/documents/text",
+  requireAuth,
+  requireRole(...CREATOR_ROLES),
+  drillWriteLimiter,
+  async (req, res) => {
+    const user = req.user;
+    if (!user || !user.orgId) {
+      res.status(401).json({ message: "Not authenticated" });
+      return;
+    }
+    const drillId = req.params["id"] as string;
+    const schema = z.object({
+      title: z.string().trim().min(1, "Title is required").max(200),
+      body: z.string().trim().min(1, "Body content is required"),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ errors: parsed.error.flatten().fieldErrors });
+      return;
+    }
+
+    try {
+      const [drill] = await db
+        .select({
+          id: drills.id,
+          title: drills.title,
+          description: drills.description,
+          telenowKbId: drills.telenowKbId,
+          orgId: drills.orgId,
+        })
+        .from(drills)
+        .where(and(eq(drills.id, drillId), eq(drills.orgId, user.orgId)))
+        .limit(1);
+
+      if (!drill) {
+        res.status(404).json({ message: "Course not found." });
+        return;
+      }
+
+      const { client, telenowOrgId } = await getTelenowClientForOrg(user.orgId);
+      const kbId = await ensureCourseKnowledgeBase(drill, client, telenowOrgId);
+      const doc = await client.addKbTextDocument(kbId, parsed.data, telenowOrgId);
+      res.status(201).json({ document: doc });
+    } catch (err) {
+      console.error("[drills] POST /:id/knowledge-base/documents/text error:", err);
+      res.status(500).json({ message: "Failed to add text document to knowledge base." });
+    }
+  },
+);
+
+// POST /:id/knowledge-base/documents/upload — upload a file to the knowledge base
+router.post(
+  "/:id/knowledge-base/documents/upload",
+  requireAuth,
+  requireRole(...CREATOR_ROLES),
+  drillWriteLimiter,
+  upload.single("file"),
+  async (req, res) => {
+    const user = req.user;
+    if (!user || !user.orgId) {
+      res.status(401).json({ message: "Not authenticated" });
+      return;
+    }
+    const drillId = req.params["id"] as string;
+    const file = req.file;
+    if (!file) {
+      res.status(400).json({ message: "A file is required (field name: 'file')." });
+      return;
+    }
+
+    try {
+      const [drill] = await db
+        .select({
+          id: drills.id,
+          title: drills.title,
+          description: drills.description,
+          telenowKbId: drills.telenowKbId,
+          orgId: drills.orgId,
+        })
+        .from(drills)
+        .where(and(eq(drills.id, drillId), eq(drills.orgId, user.orgId)))
+        .limit(1);
+
+      if (!drill) {
+        res.status(404).json({ message: "Course not found." });
+        return;
+      }
+
+      const { client, telenowOrgId } = await getTelenowClientForOrg(user.orgId);
+      const kbId = await ensureCourseKnowledgeBase(drill, client, telenowOrgId);
+      const title = (req.body["title"] as string | undefined)?.trim();
+
+      const isZip =
+        file.originalname.toLowerCase().endsWith(".zip") ||
+        file.mimetype === "application/zip" ||
+        file.mimetype === "application/x-zip-compressed";
+
+      if (isZip) {
+        const zip = await JSZip.loadAsync(file.buffer);
+        const supportedExts = new Set(["pdf", "docx", "txt", "md", "markdown", "csv"]);
+        const mimeByExt: Record<string, string> = {
+          pdf: "application/pdf",
+          docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          txt: "text/plain",
+          md: "text/markdown",
+          markdown: "text/markdown",
+          csv: "text/csv",
+        };
+
+        const entries: Array<{ name: string; obj: any }> = [];
+        zip.forEach((name, obj) => {
+          if (!obj.dir) entries.push({ name, obj });
+        });
+
+        const uploadedDocs: any[] = [];
+        for (const entry of entries) {
+          const norm = entry.name.replace(/\\/g, "/");
+          const segments = norm.split("/").filter(Boolean);
+          if (segments.some((s) => s === "__MACOSX")) continue;
+          const fname = segments[segments.length - 1] || "";
+          if (fname.startsWith(".") || fname.toLowerCase() === "thumbs.db") continue;
+          if (segments.slice(0, -1).some((s) => s.startsWith("."))) continue;
+
+          const dot = fname.lastIndexOf(".");
+          const ext = dot >= 0 ? fname.slice(dot + 1).toLowerCase() : "";
+          if (!supportedExts.has(ext)) continue;
+
+          const buf = (await entry.obj.async("nodebuffer")) as Buffer;
+          const doc = await client.uploadKbDocument(
+            kbId,
+            {
+              fileBuffer: buf,
+              fileName: fname,
+              mimeType: mimeByExt[ext] || "application/octet-stream",
+              title: norm,
+            },
+            telenowOrgId,
+          );
+          uploadedDocs.push(doc);
+        }
+
+        if (uploadedDocs.length === 0) {
+          res.status(400).json({
+            message:
+              "No supported documents (.pdf, .docx, .txt, .md, .csv) found in the zip archive.",
+          });
+          return;
+        }
+
+        res.status(201).json({
+          document: uploadedDocs[0],
+          documents: uploadedDocs,
+        });
+        return;
+      }
+
+      const doc = await client.uploadKbDocument(
+        kbId,
+        {
+          fileBuffer: file.buffer,
+          fileName: file.originalname,
+          mimeType: file.mimetype,
+          title: title || undefined,
+        },
+        telenowOrgId,
+      );
+      res.status(201).json({ document: doc, documents: [doc] });
+    } catch (err) {
+      console.error("[drills] POST /:id/knowledge-base/documents/upload error:", err);
+      res.status(500).json({ message: "Failed to upload document to knowledge base." });
+    }
+  },
+);
+
+// POST /:id/knowledge-base/documents/url — ingest a public https:// URL
+router.post(
+  "/:id/knowledge-base/documents/url",
+  requireAuth,
+  requireRole(...CREATOR_ROLES),
+  drillWriteLimiter,
+  async (req, res) => {
+    const user = req.user;
+    if (!user || !user.orgId) {
+      res.status(401).json({ message: "Not authenticated" });
+      return;
+    }
+    const drillId = req.params["id"] as string;
+    const schema = z.object({
+      url: z.string().trim().url("Must be a valid https:// URL"),
+      title: z.string().trim().max(200).optional(),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ errors: parsed.error.flatten().fieldErrors });
+      return;
+    }
+
+    try {
+      const [drill] = await db
+        .select({
+          id: drills.id,
+          title: drills.title,
+          description: drills.description,
+          telenowKbId: drills.telenowKbId,
+          orgId: drills.orgId,
+        })
+        .from(drills)
+        .where(and(eq(drills.id, drillId), eq(drills.orgId, user.orgId)))
+        .limit(1);
+
+      if (!drill) {
+        res.status(404).json({ message: "Course not found." });
+        return;
+      }
+
+      const { client, telenowOrgId } = await getTelenowClientForOrg(user.orgId);
+      const kbId = await ensureCourseKnowledgeBase(drill, client, telenowOrgId);
+      const doc = await client.addKbUrlDocument(kbId, parsed.data, telenowOrgId);
+      res.status(201).json({ document: doc });
+    } catch (err) {
+      console.error("[drills] POST /:id/knowledge-base/documents/url error:", err);
+      res.status(500).json({ message: "Failed to ingest URL into knowledge base." });
+    }
+  },
+);
+
+// DELETE /:id/knowledge-base/documents/:docId — remove a document from the KB
+router.delete(
+  "/:id/knowledge-base/documents/:docId",
+  requireAuth,
+  requireRole(...CREATOR_ROLES),
+  drillWriteLimiter,
+  async (req, res) => {
+    const user = req.user;
+    if (!user || !user.orgId) {
+      res.status(401).json({ message: "Not authenticated" });
+      return;
+    }
+    const drillId = req.params["id"] as string;
+    const docId = req.params["docId"] as string;
+    try {
+      const [drill] = await db
+        .select({
+          id: drills.id,
+          telenowKbId: drills.telenowKbId,
+          orgId: drills.orgId,
+        })
+        .from(drills)
+        .where(and(eq(drills.id, drillId), eq(drills.orgId, user.orgId)))
+        .limit(1);
+
+      if (!drill) {
+        res.status(404).json({ message: "Course not found." });
+        return;
+      }
+
+      if (drill.telenowKbId) {
+        const { client, telenowOrgId } = await getTelenowClientForOrg(user.orgId);
+        await client.deleteKbDocument(drill.telenowKbId, docId, telenowOrgId);
+      }
+      res.status(204).end();
+    } catch (err) {
+      console.error("[drills] DELETE /:id/knowledge-base/documents/:docId error:", err);
+      res.status(500).json({ message: "Failed to remove document from knowledge base." });
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
 // POST /:id/documents — upload a knowledge-dump file (multipart: "file")
 // ---------------------------------------------------------------------------
 
@@ -1711,10 +2301,25 @@ router.post(
         return;
       }
 
-      const docs = await db
-        .select()
-        .from(courseDocuments)
-        .where(eq(courseDocuments.courseId, drillId));
+      let docs: Array<{ originalName: string; textContent: string | null }> = [];
+      if (existing.telenowKbId) {
+        try {
+          const { client, telenowOrgId } = await getTelenowClientForOrg(user.orgId);
+          const kbDocs = await client.listKbDocuments(existing.telenowKbId, telenowOrgId);
+          docs = kbDocs.map((d) => ({
+            originalName: d.title,
+            textContent: d.body || d.title,
+          }));
+        } catch (e) {
+          console.warn("[drills] could not fetch KB docs for generate-faqs", e);
+        }
+      }
+      if (docs.length === 0) {
+        docs = await db
+          .select()
+          .from(courseDocuments)
+          .where(eq(courseDocuments.courseId, drillId));
+      }
 
       const [org] = await db
         .select()
@@ -1802,6 +2407,67 @@ router.post(
       res.status(500).json({ message: "Failed to generate the coach persona." });
     }
   },
+);
+
+// ---------------------------------------------------------------------------
+// DELETE /:id — delete a course and its Telenow resources
+// ---------------------------------------------------------------------------
+router.delete(
+  "/:id",
+  requireAuth,
+  requireRole(...CREATOR_ROLES),
+  drillWriteLimiter,
+  async (req, res) => {
+    const user = req.user!;
+    if (!user.orgId) {
+      res.status(403).json({ message: "No organisation attached." });
+      return;
+    }
+    try {
+      const [drill] = await db
+        .select()
+        .from(drills)
+        .where(
+          and(eq(drills.id, req.params["id"] as string), eq(drills.orgId, user.orgId)),
+        )
+        .limit(1);
+
+      if (!drill) {
+        res.status(404).json({ message: "Course not found." });
+        return;
+      }
+
+      if (drill.telenowAgentId || drill.telenowCampaignId || drill.telenowKbId) {
+        try {
+          const { client } = await getTelenowClientForOrg(user.orgId);
+          if (drill.telenowCampaignId) {
+            await client.deleteCampaign(drill.telenowCampaignId).catch((err) => {
+              console.warn(`[drills] failed to clean up campaign ${drill.telenowCampaignId}`, err);
+            });
+          }
+          if (drill.telenowAgentId) {
+            await client.deleteAgent(drill.telenowAgentId).catch((err) => {
+              console.warn(`[drills] failed to clean up agent ${drill.telenowAgentId}`, err);
+            });
+          }
+          if (drill.telenowKbId) {
+            await client.deleteKnowledgeBase(drill.telenowKbId).catch((err) => {
+              console.warn(`[drills] failed to clean up knowledge base ${drill.telenowKbId}`, err);
+            });
+          }
+        } catch (err) {
+          console.warn("[drills] could not connect to Telenow for cleanup", err);
+        }
+      }
+
+      await db.delete(drills).where(eq(drills.id, drill.id));
+
+      res.status(200).json({ message: "Course deleted." });
+    } catch (err) {
+      console.error("[drills] DELETE /:id failed", err);
+      res.status(500).json({ message: "Something went wrong deleting the course." });
+    }
+  }
 );
 
 export const drillsRouter = router;
