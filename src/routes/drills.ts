@@ -52,7 +52,11 @@ import type {
   CourseEnrollmentRow,
   DrillRow,
 } from "../db/schema.js";
-import { generateCoachPersona, generateFaqSuggestions } from "../lib/ai/prompts.js";
+import {
+  generateCoachPersona,
+  generateFaqSuggestions,
+  generateRubricSuggestions,
+} from "../lib/ai/prompts.js";
 import { aiEnabled } from "../lib/ai/client.js";
 import { handleDatabaseError } from "../lib/dbErrors.js";
 import { extractText } from "../lib/docs/extractText.js";
@@ -2345,6 +2349,103 @@ router.post(
     } catch (err) {
       console.error("[drills] generate-faqs failed", err);
       res.status(500).json({ message: "Failed to generate questions." });
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
+// POST /:id/generate-rubric — draft scoring rubric from the knowledge dump
+// (AI-generated suggestions only; saving persists them via PUT /:id)
+// ---------------------------------------------------------------------------
+
+router.post(
+  "/:id/generate-rubric",
+  requireAuth,
+  requireRole(...CREATOR_ROLES),
+  drillWriteLimiter,
+  async (req, res) => {
+    const user = req.user;
+    if (!user || !user.orgId) {
+      res
+        .status(user ? 400 : 401)
+        .json({
+          message: user
+            ? "You must belong to an organisation to generate scoring rubrics."
+            : "Not authenticated",
+        });
+      return;
+    }
+
+    const drillId = req.params["id"];
+    if (!drillId || typeof drillId !== "string") {
+      res.status(400).json({ message: "A valid course id is required" });
+      return;
+    }
+
+    try {
+      const [existing] = await db
+        .select()
+        .from(drills)
+        .where(and(eq(drills.id, drillId), eq(drills.orgId, user.orgId)))
+        .limit(1);
+
+      if (!existing) {
+        res.status(404).json({ message: "Course not found." });
+        return;
+      }
+
+      if (!aiEnabled) {
+        res.status(200).json({
+          rubric: [],
+          message: "AI rubric generation is not configured for this workspace.",
+        });
+        return;
+      }
+
+      let docs: Array<{ originalName: string; textContent: string | null }> = [];
+      if (existing.telenowKbId) {
+        try {
+          const { client, telenowOrgId } = await getTelenowClientForOrg(user.orgId);
+          const kbDocs = await client.listKbDocuments(existing.telenowKbId, telenowOrgId);
+          docs = kbDocs.map((d) => ({
+            originalName: d.title,
+            textContent: d.body || d.title,
+          }));
+        } catch (e) {
+          console.warn("[drills] could not fetch KB docs for generate-rubric", e);
+        }
+      }
+      if (docs.length === 0) {
+        docs = await db
+          .select()
+          .from(courseDocuments)
+          .where(eq(courseDocuments.courseId, drillId));
+      }
+
+      const [org] = await db
+        .select()
+        .from(orgs)
+        .where(eq(orgs.id, user.orgId))
+        .limit(1);
+      if (!org) {
+        res.status(500).json({ message: "Organisation not found." });
+        return;
+      }
+
+      const rubric = await generateRubricSuggestions({ course: existing, org, docs });
+      if (rubric.length === 0) {
+        res.status(200).json({
+          rubric: [],
+          message:
+            "Add some knowledge first (paste notes or upload documents) so a scoring rubric can be generated.",
+        });
+        return;
+      }
+
+      res.status(200).json({ rubric });
+    } catch (err) {
+      console.error("[drills] generate-rubric failed", err);
+      res.status(500).json({ message: "Failed to generate scoring rubric." });
     }
   },
 );

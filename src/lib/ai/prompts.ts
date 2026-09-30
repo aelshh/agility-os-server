@@ -52,7 +52,7 @@ function buildReference(
   return truncate(parts.join("\n\n---\n\n"), MAX_REFERENCE_CHARS);
 }
 
-function extractJsonObject(content: string | null | undefined): Record<string, unknown> | null {
+export function extractJsonObject(content: string | null | undefined): Record<string, unknown> | null {
   if (!content) return null;
   const start = content.indexOf("{");
   if (start < 0) return null;
@@ -209,19 +209,40 @@ export async function generateFaqSuggestions(input: {
   return out;
 }
 
+export type CheckinStructuredSummary = {
+  report: string;
+  priorities: string;
+  blockers: string;
+  suggestions: string;
+  updates: string;
+  sentiment: "positive" | "neutral" | "needs_attention" | "blocked";
+  keyTakeaway: string;
+  answers: Array<{
+    question: string;
+    answer: string;
+  }>;
+};
+
 /**
  * Structured digest of a daily check-in call transcript. Produces
- * { report, suggestions, updates } straight from the spoken text. Returns
- * null when no LLM provider is configured or the output can't be parsed.
+ * { report, priorities, blockers, suggestions, updates, sentiment, keyTakeaway, answers }
+ * straight from the spoken text. Returns null when no LLM provider is configured
+ * or the output can't be parsed.
  */
 export async function generateCheckinSummary(
   transcript: string,
-): Promise<{ report: string; suggestions: string; updates: string } | null> {
+  questions?: string[],
+): Promise<CheckinStructuredSummary | null> {
   const client = getAiClient();
   if (!client) return null;
 
   const text = truncate(transcript.trim(), 12_000);
   if (text.length < 3) return null;
+
+  const questionsHint =
+    questions && questions.length > 0
+      ? `\nThe AI voice assistant asked the following questions during the call:\n${questions.map((q, i) => `${i + 1}. ${q}`).join("\n")}`
+      : "";
 
   const completion = await client.chat.completions.create({
     model: AI_MODEL,
@@ -230,15 +251,29 @@ export async function generateCheckinSummary(
       {
         role: "system",
         content:
-          "You summarise short daily voice check-in calls between a manager and one of their reports. " +
-          "The call collects three things. Reply ONLY with JSON of the form " +
-          '{"report": "<status of the report>", "suggestions": "<suggestions, or empty>", "updates": "<updates or blockers, or empty>"}. ' +
-          "Write the manager-facing summary in clear, concise English. Use empty strings when nothing was said for a section. " +
-          "Never invent facts not present in the transcript.",
+          "You are an expert executive assistant summarizing a daily voice check-in call between an AI voice assistant and a team member. " +
+          "Extract accurate, structured answers from the transcript. Reply ONLY with JSON of the form:\n" +
+          "{\n" +
+          '  "report": "<Accomplishments / progress made since last check-in>",\n' +
+          '  "priorities": "<Main priorities or planned tasks for today>",\n' +
+          '  "blockers": "<Blockers, impediments, illness, or support needed, or empty string if none>",\n' +
+          '  "suggestions": "<Suggestions or feedback to share, or empty string if none>",\n' +
+          '  "updates": "<Other key updates or context, or empty string if none>",\n' +
+          '  "sentiment": "<one of: \\"positive\\", \\"neutral\\", \\"needs_attention\\", \\"blocked\\">",\n' +
+          '  "keyTakeaway": "<A crisp 1-sentence executive summary of caller status>",\n' +
+          '  "answers": [\n' +
+          '    { "question": "<question asked>", "answer": "<concise summary of caller\'s spoken answer>" }\n' +
+          "  ]\n" +
+          "}\n\n" +
+          "Guidelines:\n" +
+          "- If a topic wasn't mentioned, return an empty string \"\" or empty array [].\n" +
+          "- If the caller reported illness, inability to work, or being blocked, set sentiment to \"needs_attention\" or \"blocked\" and clearly state in blockers.\n" +
+          "- For \"answers\", summarize the direct answer to each question asked during the call.\n" +
+          "- Write in professional, clear English. Never invent facts not in the transcript.",
       },
       {
         role: "user",
-        content: `Transcript of the check-in call:\n${text}`,
+        content: `Transcript of the check-in call:${questionsHint}\n\n${text}`,
       },
     ],
   });
@@ -250,10 +285,170 @@ export async function generateCheckinSummary(
     (typeof v === "string" ? v.trim() : "").slice(0, 2000);
 
   const report = asText(parsed["report"]);
+  const priorities = asText(parsed["priorities"]);
+  const blockers = asText(parsed["blockers"]);
   const suggestions = asText(parsed["suggestions"]);
   const updates = asText(parsed["updates"]);
+  const keyTakeaway = asText(parsed["keyTakeaway"]);
 
-  if (!report && !suggestions && !updates) return null;
+  const rawSentiment = asText(parsed["sentiment"]).toLowerCase();
+  const sentiment: CheckinStructuredSummary["sentiment"] =
+    rawSentiment === "positive" ||
+    rawSentiment === "neutral" ||
+    rawSentiment === "needs_attention" ||
+    rawSentiment === "blocked"
+      ? rawSentiment
+      : blockers.length > 0
+        ? "needs_attention"
+        : "neutral";
 
-  return { report, suggestions, updates };
+  const rawAnswers = Array.isArray(parsed["answers"]) ? parsed["answers"] : [];
+  const answers: Array<{ question: string; answer: string }> = [];
+  for (const item of rawAnswers) {
+    if (typeof item === "object" && item !== null) {
+      const q = asText((item as Record<string, unknown>)["question"]);
+      const a = asText((item as Record<string, unknown>)["answer"]);
+      if (q && a) {
+        answers.push({ question: q, answer: a });
+      }
+    }
+  }
+
+  if (!report && !priorities && !blockers && !suggestions && !updates && answers.length === 0) {
+    return null;
+  }
+
+  return {
+    report,
+    priorities,
+    blockers,
+    suggestions,
+    updates,
+    sentiment,
+    keyTakeaway: keyTakeaway || report || updates || "Check-in completed.",
+    answers,
+  };
+}
+
+export type RubricCriterionSuggestion = {
+  name: string;
+  weight: number;
+  description: string;
+};
+
+function normalizeRubricWeights(list: RubricCriterionSuggestion[]): void {
+  if (list.length === 0) return;
+  const currentTotal = list.reduce((sum, item) => sum + item.weight, 0);
+  if (currentTotal === 100) return;
+
+  if (currentTotal === 0) {
+    const even = Math.floor(100 / list.length);
+    const remainder = 100 - even * list.length;
+    list.forEach((item, idx) => {
+      item.weight = even + (idx < remainder ? 1 : 0);
+    });
+    return;
+  }
+
+  // Scale proportionally to sum to 100
+  let runningSum = 0;
+  for (let i = 0; i < list.length; i++) {
+    const item = list[i];
+    if (!item) continue;
+    if (i === list.length - 1) {
+      item.weight = Math.max(1, 100 - runningSum);
+    } else {
+      const scaled = Math.max(1, Math.round((item.weight / currentTotal) * 100));
+      item.weight = scaled;
+      runningSum += scaled;
+    }
+  }
+}
+
+/**
+ * Suggests a balanced scoring rubric (3 to 5 criteria summing to 100%)
+ * based on course context, knowledge notes/docs, and practice questions.
+ * Returns [] when no provider is configured.
+ */
+export async function generateRubricSuggestions(input: {
+  course: CourseLike;
+  org: OrgLike;
+  docs: DocLike[];
+}): Promise<RubricCriterionSuggestion[]> {
+  const client = getAiClient();
+  if (!client) return [];
+
+  const { course, org, docs } = input;
+  const reference = buildReference(course, docs);
+  const questions = asFaqs(course.faqs);
+
+  const questionBlock =
+    questions.length > 0
+      ? `Practice questions:\n${questions.map((q, i) => `${i + 1}. ${q}`).join("\n")}`
+      : "";
+
+  const completion = await client.chat.completions.create({
+    model: AI_MODEL,
+    response_format: { type: "json_object" },
+    messages: [
+      {
+        role: "system",
+        content:
+          "You generate scoring rubrics for corporate spoken voice training. " +
+          "Given a training course and its reference materials, create 3 to 5 distinct, measurable evaluation criteria to grade a learner's verbal performance during an AI practice call. " +
+          "Each criterion must have: " +
+          "- name: A concise, descriptive title (<= 50 chars). " +
+          "- weight: An integer percentage weighting between 10 and 50. ALL CRITERIA WEIGHTS MUST SUM TO EXACTLY 100. " +
+          "- description: 1-2 clear sentences explaining what 'good' performance looks like on this criterion. " +
+          'Reply ONLY with JSON of the form: {"rubric": [{"name": "...", "weight": 25, "description": "..."}, ...]}.',
+      },
+      {
+        role: "user",
+        content: [
+          `Organisation: ${org.name}.`,
+          `Course title: ${course.title}.`,
+          `Course description: ${course.description?.trim() || "(none)"}.`,
+          questionBlock,
+          reference
+            ? `Reference material:\n${reference}`
+            : "No reference material provided — base criteria on course title and description.",
+        ]
+          .filter(Boolean)
+          .join("\n\n"),
+      },
+    ],
+  });
+
+  const parsed = extractJsonObject(completion.choices[0]?.message?.content);
+  if (!parsed) return [];
+
+  const raw = Array.isArray(parsed["rubric"]) ? parsed["rubric"] : [];
+  const list: RubricCriterionSuggestion[] = [];
+
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const obj = item as Record<string, unknown>;
+    const name = typeof obj["name"] === "string" ? obj["name"].trim() : "";
+    const description =
+      typeof obj["description"] === "string" ? obj["description"].trim() : "";
+    const weightRaw =
+      typeof obj["weight"] === "number" && Number.isFinite(obj["weight"])
+        ? Math.round(obj["weight"])
+        : 0;
+
+    if (name.length > 0) {
+      list.push({
+        name: name.slice(0, 100),
+        weight: Math.max(1, Math.min(100, weightRaw)),
+        description: description.slice(0, 500),
+      });
+    }
+  }
+
+  if (list.length === 0) return [];
+
+  // Normalize weights so they always sum up to exactly 100
+  normalizeRubricWeights(list);
+
+  return list;
 }
