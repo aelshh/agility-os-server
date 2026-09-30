@@ -59,6 +59,14 @@ export class TelenowNotConfiguredError extends TelenowError {
   }
 }
 
+function toAsciiHeaderValue(value: string): string {
+  return value
+    .normalize("NFKD")
+    .replace(/[^\x20-\x7E]/g, "-")
+    .replace(/[\r\n]+/g, " ")
+    .slice(0, 255);
+}
+
 // ---------------------------------------------------------------------------
 // JSON helpers
 // ---------------------------------------------------------------------------
@@ -573,9 +581,17 @@ export class TelenowClient {
   ): Promise<unknown> {
     const headers: Record<string, string> = {
       "X-API-Key": this.apiKey,
-      ...extraHeaders,
     };
-    if (idempotencyKey) headers["Idempotency-Key"] = idempotencyKey;
+    if (extraHeaders) {
+      for (const [k, v] of Object.entries(extraHeaders)) {
+        if (v !== undefined && v !== null) {
+          headers[k] = toAsciiHeaderValue(String(v));
+        }
+      }
+    }
+    if (idempotencyKey) {
+      headers["Idempotency-Key"] = toAsciiHeaderValue(idempotencyKey);
+    }
 
     let res: Response;
     try {
@@ -677,12 +693,14 @@ export class TelenowClient {
         telephonyConfig: {
           opener: input.opener ?? "Hi there! I am your practice coach. Are you ready to begin?"
         },
-        postCallAnalysis: {
-          enabled: true,
-          qaCriteria: input.qaCriteria,
-        },
         metadata: {
           agilityos: { courseId: input.courseId },
+          postCallAnalysis: {
+            enabled: true,
+            minDurationSec: 5,
+            minCustomerTurns: 1,
+            qaCriteria: input.qaCriteria,
+          },
         },
       },
       `agent-${input.courseId}`,
@@ -709,13 +727,19 @@ export class TelenowClient {
       name: input.name.slice(0, 100),
       agentId: input.agentId,
       concurrency: CAMPAIGN_CONCURRENCY,
-      startTimeLocal: input.startTimeLocal ?? CALL_WINDOW_START,
-      endTimeLocal: input.endTimeLocal ?? CALL_WINDOW_END,
       timezone: input.timezone,
       source: input.source,
       start: true,
       targets: input.targets,
     };
+
+    const startLocal = input.startTimeLocal?.trim();
+    const endLocal = input.endTimeLocal?.trim();
+    if (startLocal && endLocal) {
+      campaignBody["startTimeLocal"] = startLocal;
+      campaignBody["endTimeLocal"] = endLocal;
+    }
+
     if (input.fromNumberId) {
       campaignBody["fromNumberId"] = input.fromNumberId;
     }

@@ -17,6 +17,7 @@ import { verifyRouter } from "./routes/verify.js";
 import { webhooksRouter } from "./routes/webhooks.js";
 import { callsRouter } from "./routes/calls.js";
 import { startDailyCheckinScheduler } from "./lib/checkinScheduler.js";
+import { backfillUnevaluatedCalls } from "./lib/backfillAnalytics.js";
 
 const app = express();
 const PORT = Number(process.env["PORT"]) || 3000;
@@ -73,6 +74,12 @@ app.use("/api/calls", callsRouter);
 
 app.listen(PORT, () => {
   console.log(`[server] listening on http://localhost:${PORT}`);
+  // Backfill any unevaluated past calls
+  void backfillUnevaluatedCalls().then(({ evaluatedCourses, fixedCheckins }) => {
+    if (evaluatedCourses > 0 || fixedCheckins > 0) {
+      console.log(`[backfill] Evaluated ${evaluatedCourses} course calls, fixed ${fixedCheckins} check-ins.`);
+    }
+  });
 });
 
 // Recurring background jobs.

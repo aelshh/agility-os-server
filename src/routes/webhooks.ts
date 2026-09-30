@@ -20,13 +20,25 @@
 
 import { createHmac, timingSafeEqual } from "node:crypto";
 
-import { and, eq, or } from "drizzle-orm";
+import { and, eq, or, sql } from "drizzle-orm";
 import express, { Router } from "express";
 
 import { db } from "../db/index.js";
-import { courseEnrollments, dailyCheckins } from "../db/schema.js";
+import {
+  courseEnrollments,
+  dailyCheckins,
+  dailyCheckinRuns,
+  dailyCheckinSchedules,
+  drills,
+  orgs,
+  users,
+} from "../db/schema.js";
 import { loadWebhookSigningSecret } from "../lib/provisionCourse.js";
 import { generateCheckinSummary } from "../lib/ai/prompts.js";
+import {
+  computeTalkRatioFromTranscript,
+  evaluateCourseCallTranscript,
+} from "../lib/ai/evaluate.js";
 
 const router = Router();
 
@@ -170,35 +182,170 @@ router.post(
 );
 
 // ---------------------------------------------------------------------------
-// Handlers
+// Handlers & Helpers
 // ---------------------------------------------------------------------------
+
+function extractCorrelationIds(payload: Record<string, unknown>): {
+  identifiers: string[];
+  sessionId: string | null;
+  callSid: string | null;
+  courseId: string | null;
+  checkinScheduleId: string | null;
+  phoneNumber: string | null;
+} {
+  const vars = asObj(payload["variables"]) ?? {};
+
+  const idSet = new Set<string>();
+  const addIfValid = (val: unknown) => {
+    if (
+      typeof val === "string" &&
+      val.trim().length > 0 &&
+      val !== "null" &&
+      val !== "undefined"
+    ) {
+      idSet.add(val.trim());
+    }
+  };
+
+  addIfValid(payload["identifier"]);
+  addIfValid(payload["targetId"]);
+  addIfValid(payload["target_id"]);
+  addIfValid(payload["rowId"]);
+  addIfValid(payload["row_id"]);
+
+  addIfValid(vars["source_row"]);
+  addIfValid(vars["enrollment_id"]);
+  addIfValid(vars["enrollmentId"]);
+  addIfValid(vars["checkin_id"]);
+  addIfValid(vars["checkinId"]);
+  addIfValid(vars["identifier"]);
+  addIfValid(vars["id"]);
+
+  const sessionId = asString(payload["sessionId"]) ?? asString(payload["session_id"]);
+  const callSid = asString(payload["callSid"]) ?? asString(payload["call_sid"]);
+
+  const sourceRef =
+    asString(vars["source_ref"]) ??
+    asString(vars["sourceRef"]) ??
+    asString(payload["source"]);
+
+  let courseId: string | null = null;
+  let checkinScheduleId: string | null = null;
+
+  if (sourceRef) {
+    const courseMatch = sourceRef.match(/agilityos-course-([0-9a-fA-F-]+)/);
+    if (courseMatch && typeof courseMatch[1] === "string") courseId = courseMatch[1];
+
+    const checkinMatch = sourceRef.match(/agilityos-checkin-([0-9a-fA-F-]+)/);
+    if (checkinMatch && typeof checkinMatch[1] === "string") checkinScheduleId = checkinMatch[1];
+  }
+
+  const phoneNumber =
+    asString(payload["toNumber"]) ??
+    asString(payload["to_number"]) ??
+    asString(payload["fromOrTo"]) ??
+    asString(payload["from_or_to"]);
+
+  return {
+    identifiers: Array.from(idSet),
+    sessionId,
+    callSid,
+    courseId,
+    checkinScheduleId,
+    phoneNumber,
+  };
+}
+
+function parseRecordingUrl(payload: Record<string, unknown>): string | null {
+  const recordingObj = asObj(payload["recording"]);
+  return (
+    asString(recordingObj?.["url"]) ??
+    asString(payload["recordingUrl"]) ??
+    asString(payload["recording_url"]) ??
+    (typeof payload["recording"] === "string" ? asString(payload["recording"]) : null)
+  );
+}
+
+async function resolveInternalOrgId(
+  orgIdOrTelenowOrgId?: string | null,
+): Promise<string | null> {
+  if (!orgIdOrTelenowOrgId) return null;
+  const [org] = await db
+    .select({ id: orgs.id })
+    .from(orgs)
+    .where(
+      or(
+        eq(orgs.id, orgIdOrTelenowOrgId),
+        eq(orgs.telenowOrgId, orgIdOrTelenowOrgId),
+      ),
+    )
+    .limit(1);
+  return org?.id ?? null;
+}
 
 async function findEnrollment(
   payload: Record<string, unknown>,
   orgId?: string | null,
 ): Promise<{ id: string; status: string } | null> {
-  const identifier = asString(payload["identifier"]);
-  const sessionId = asString(payload["sessionId"]);
+  const resolvedOrgId =
+    (await resolveInternalOrgId(orgId)) ??
+    (await resolveInternalOrgId(asString(payload["orgId"])));
 
-  if (!identifier && !sessionId) return null;
+  const { identifiers, sessionId, courseId, phoneNumber } =
+    extractCorrelationIds(payload);
 
   const conditions = [];
-  if (identifier) conditions.push(eq(courseEnrollments.id, identifier));
-  if (sessionId)
+  for (const id of identifiers) {
+    conditions.push(eq(courseEnrollments.id, id));
+  }
+  if (sessionId) {
     conditions.push(eq(courseEnrollments.telenowSessionId, sessionId));
-
-  const whereList = [or(...conditions)!];
-  if (orgId) {
-    whereList.push(eq(courseEnrollments.orgId, orgId));
   }
 
-  const [row] = await db
-    .select({ id: courseEnrollments.id, status: courseEnrollments.status })
-    .from(courseEnrollments)
-    .where(and(...whereList))
-    .limit(1);
+  if (conditions.length > 0) {
+    if (resolvedOrgId) {
+      const [row] = await db
+        .select({ id: courseEnrollments.id, status: courseEnrollments.status })
+        .from(courseEnrollments)
+        .where(and(or(...conditions)!, eq(courseEnrollments.orgId, resolvedOrgId)))
+        .limit(1);
 
-  return row ?? null;
+      if (row) return row;
+    }
+
+    const [row] = await db
+      .select({ id: courseEnrollments.id, status: courseEnrollments.status })
+      .from(courseEnrollments)
+      .where(or(...conditions)!)
+      .limit(1);
+
+    if (row) return row;
+  }
+
+  // Fallback: match via courseId from source_ref + user phone
+  if (courseId && phoneNumber) {
+    const cleanPhone = phoneNumber.replace(/\D/g, "");
+    if (cleanPhone.length >= 7) {
+      const whereList = [
+        eq(courseEnrollments.courseId, courseId),
+        sql`replace(${users.phone}, ' ', '') LIKE ${"%" + cleanPhone.slice(-10)}`,
+      ];
+      if (resolvedOrgId) {
+        whereList.push(eq(courseEnrollments.orgId, resolvedOrgId));
+      }
+
+      const [row] = await db
+        .select({ id: courseEnrollments.id, status: courseEnrollments.status })
+        .from(courseEnrollments)
+        .innerJoin(users, eq(courseEnrollments.userId, users.id))
+        .where(and(...whereList))
+        .limit(1);
+
+      if (row) return row;
+    }
+  }
+
+  return null;
 }
 
 function parseTranscript(
@@ -323,29 +470,76 @@ async function handleCallEnded(
   const occurredAtRaw = asString(payload["occurredAt"]);
   const occurredAt = occurredAtRaw ? new Date(occurredAtRaw) : new Date();
   const sessionId = asString(payload["sessionId"]);
-  const recording = asObj(payload["recording"]);
+  const callSid = asString(payload["callSid"]) ?? asString(payload["call_sid"]);
+  const recordingUrl = parseRecordingUrl(payload);
 
-  // A reopened conversation marks the call answered; a dead / never-connected
-  // dial (no human, no duration) is a no-answer.
   const answeredBy = asString(payload["answeredBy"]);
   const durationSecs = asNumber(payload["durationSecs"]) ?? 0;
   const connected = answeredBy === "human" || durationSecs > 0;
   const nextStatus = connected ? "answered" : "no_answer";
 
+  const transcript = parseTranscript(payload["transcript"]);
+  const talkRatio = computeTalkRatioFromTranscript(transcript);
+
   const patch: EnrollmentUpdate = {
     durationSecs,
+    talkRatio,
   };
-  // If enrollment is not already completed, update status
-  if (enrollment.status !== "completed") {
-    patch.status = nextStatus;
-  }
   if (sessionId) patch.telenowSessionId = sessionId;
-  if (recording) {
-    const url = asString(recording["url"]);
-    if (url) patch.recordingUrl = url;
-  }
-  const transcript = parseTranscript(payload["transcript"]);
+  if (callSid) patch.telenowCallId = callSid;
+  if (recordingUrl) patch.recordingUrl = recordingUrl;
   if (transcript) patch.transcript = transcript;
+
+  // If call had speech / duration, evaluate the call immediately against the course scoring rubric
+  if (connected && transcript && transcript.length > 0) {
+    try {
+      const [courseRow] = await db
+        .select({
+          id: drills.id,
+          title: drills.title,
+          description: drills.description,
+          scoringRubric: drills.scoringRubric,
+        })
+        .from(courseEnrollments)
+        .innerJoin(drills, eq(courseEnrollments.courseId, drills.id))
+        .where(eq(courseEnrollments.id, enrollment.id))
+        .limit(1);
+
+      if (courseRow) {
+        const evalResult = await evaluateCourseCallTranscript({
+          course: courseRow,
+          transcript,
+          durationSecs,
+        });
+
+        patch.status = "completed";
+        patch.score = evalResult.score;
+        patch.summary = evalResult.summary;
+        patch.sentiment = evalResult.sentiment;
+        patch.sentimentScore = Math.round(evalResult.sentimentScore * 100);
+        patch.talkRatio = evalResult.talkRatio;
+        patch.qaScorecard = evalResult.qaScorecard;
+        patch.coachingTips = evalResult.coachingTips;
+        patch.actionItems = evalResult.actionItems;
+        patch.objections = evalResult.objections;
+        patch.topics = evalResult.topics;
+        patch.completedAt = occurredAt;
+      } else {
+        if (enrollment.status !== "completed") {
+          patch.status = nextStatus;
+        }
+      }
+    } catch (evalErr) {
+      console.error("[webhooks] Call evaluation failed in handleCallEnded:", evalErr);
+      if (enrollment.status !== "completed") {
+        patch.status = nextStatus;
+      }
+    }
+  } else {
+    if (enrollment.status !== "completed") {
+      patch.status = nextStatus;
+    }
+  }
 
   await db
     .update(courseEnrollments)
@@ -372,7 +566,8 @@ async function handleCallAnalyzed(
   const occurredAtRaw = asString(payload["occurredAt"]);
   const occurredAt = occurredAtRaw ? new Date(occurredAtRaw) : new Date();
   const sessionId = asString(payload["sessionId"]);
-  const recording = asObj(payload["recording"]);
+  const callSid = asString(payload["callSid"]) ?? asString(payload["call_sid"]);
+  const recordingUrl = parseRecordingUrl(payload);
 
   const durationSecs =
     asNumber(payload["durationSecs"]) ?? asNumber(analysis?.["durationSecs"]);
@@ -400,6 +595,7 @@ async function handleCallAnalyzed(
     completedAt: occurredAt,
   };
   if (sessionId) patch.telenowSessionId = sessionId;
+  if (callSid) patch.telenowCallId = callSid;
   if (durationSecs !== null) patch.durationSecs = durationSecs;
   if (summary) patch.summary = summary;
   if (sentiment) patch.sentiment = sentiment;
@@ -412,10 +608,7 @@ async function handleCallAnalyzed(
   if (topics) patch.topics = topics;
   if (latencyMetrics) patch.latencyMetrics = latencyMetrics;
   if (transcript) patch.transcript = transcript;
-  if (recording) {
-    const url = asString(recording["url"]);
-    if (url) patch.recordingUrl = url;
-  }
+  if (recordingUrl) patch.recordingUrl = recordingUrl;
 
   await db
     .update(courseEnrollments)
@@ -433,28 +626,66 @@ async function findDailyCheckin(
   payload: Record<string, unknown>,
   orgId?: string | null,
 ): Promise<{ id: string; status: string } | null> {
-  const identifier = asString(payload["identifier"]);
-  const sessionId = asString(payload["sessionId"]);
+  const resolvedOrgId =
+    (await resolveInternalOrgId(orgId)) ??
+    (await resolveInternalOrgId(asString(payload["orgId"])));
 
-  if (!identifier && !sessionId) return null;
+  const { identifiers, sessionId, checkinScheduleId, phoneNumber } =
+    extractCorrelationIds(payload);
 
   const conditions = [];
-  if (identifier) conditions.push(eq(dailyCheckins.id, identifier));
-  if (sessionId)
+  for (const id of identifiers) {
+    conditions.push(eq(dailyCheckins.id, id));
+  }
+  if (sessionId) {
     conditions.push(eq(dailyCheckins.telenowSessionId, sessionId));
-
-  const whereList = [or(...conditions)!];
-  if (orgId) {
-    whereList.push(eq(dailyCheckins.orgId, orgId));
   }
 
-  const [row] = await db
-    .select({ id: dailyCheckins.id, status: dailyCheckins.status })
-    .from(dailyCheckins)
-    .where(and(...whereList))
-    .limit(1);
+  if (conditions.length > 0) {
+    if (resolvedOrgId) {
+      const [row] = await db
+        .select({ id: dailyCheckins.id, status: dailyCheckins.status })
+        .from(dailyCheckins)
+        .where(and(or(...conditions)!, eq(dailyCheckins.orgId, resolvedOrgId)))
+        .limit(1);
 
-  return row ?? null;
+      if (row) return row;
+    }
+
+    const [row] = await db
+      .select({ id: dailyCheckins.id, status: dailyCheckins.status })
+      .from(dailyCheckins)
+      .where(or(...conditions)!)
+      .limit(1);
+
+    if (row) return row;
+  }
+
+  // Fallback: match via checkinScheduleId + user phone
+  if (checkinScheduleId && phoneNumber) {
+    const cleanPhone = phoneNumber.replace(/\D/g, "");
+    if (cleanPhone.length >= 7) {
+      const whereList = [
+        eq(dailyCheckinRuns.scheduleId, checkinScheduleId),
+        sql`replace(${users.phone}, ' ', '') LIKE ${"%" + cleanPhone.slice(-10)}`,
+      ];
+      if (resolvedOrgId) {
+        whereList.push(eq(dailyCheckins.orgId, resolvedOrgId));
+      }
+
+      const [row] = await db
+        .select({ id: dailyCheckins.id, status: dailyCheckins.status })
+        .from(dailyCheckins)
+        .innerJoin(dailyCheckinRuns, eq(dailyCheckins.runId, dailyCheckinRuns.id))
+        .innerJoin(users, eq(dailyCheckins.userId, users.id))
+        .where(and(...whereList))
+        .limit(1);
+
+      if (row) return row;
+    }
+  }
+
+  return null;
 }
 
 async function handleCheckinCallEnded(
@@ -469,7 +700,7 @@ async function handleCheckinCallEnded(
   const occurredAtRaw = asString(payload["occurredAt"]);
   const occurredAt = occurredAtRaw ? new Date(occurredAtRaw) : new Date();
   const sessionId = asString(payload["sessionId"]);
-  const recording = asObj(payload["recording"]);
+  const recordingUrl = parseRecordingUrl(payload);
 
   const answeredBy = asString(payload["answeredBy"]);
   const durationSecs = asNumber(payload["durationSecs"]) ?? 0;
@@ -478,10 +709,7 @@ async function handleCheckinCallEnded(
 
   const patch: Partial<typeof dailyCheckins.$inferInsert> = { status: nextStatus };
   if (sessionId) patch.telenowSessionId = sessionId;
-  if (recording) {
-    const url = asString(recording["url"]);
-    if (url) patch.recordingUrl = url;
-  }
+  if (recordingUrl) patch.recordingUrl = recordingUrl;
 
   // Summarize the spoken update when a transcript is available.
   const transcriptArray = payload["transcript"];
@@ -493,8 +721,29 @@ async function handleCheckinCallEnded(
       .map((t) => `${t.role}: ${t.text}`);
       
     if (lines.length > 0) {
-      const summary = await generateCheckinSummary(lines.join("\n")).catch(() => null);
-      if (summary) patch.summary = summary;
+      const [scheduleRow] = await db
+        .select({
+          questionScript: dailyCheckinSchedules.questionScript,
+        })
+        .from(dailyCheckins)
+        .innerJoin(dailyCheckinRuns, eq(dailyCheckins.runId, dailyCheckinRuns.id))
+        .innerJoin(dailyCheckinSchedules, eq(dailyCheckinRuns.scheduleId, dailyCheckinSchedules.id))
+        .where(eq(dailyCheckins.id, checkin.id))
+        .limit(1);
+
+      const questions = scheduleRow?.questionScript
+        ? scheduleRow.questionScript
+            .split(/\r?\n/)
+            .map((l: string) => l.trim().replace(/^(\d+[.)]\s*|[-*•]\s*)/, "").trim())
+            .filter(Boolean)
+        : undefined;
+
+      const summaryObj = await generateCheckinSummary(lines.join("\n"), questions).catch(() => null);
+      if (summaryObj) {
+        patch.summary = summaryObj;
+        patch.status = "completed";
+        patch.completedAt = occurredAt;
+      }
     }
   }
 
@@ -532,3 +781,4 @@ async function handleCheckinCallAnalyzed(
 }
 
 export const webhooksRouter = router;
+export { handleCallEnded, handleCallAnalyzed, findEnrollment, findDailyCheckin };

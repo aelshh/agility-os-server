@@ -18,7 +18,7 @@
  * recoverable via POST /api/drills/:id/provision.
  */
 
-import { and, asc, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, inArray, or } from "drizzle-orm";
 
 import { db } from "../db/index.js";
 import {
@@ -26,6 +26,7 @@ import {
   courseEnrollments,
   drills,
   drillAudience,
+  orgs,
   telenowWebhooks,
   users,
 } from "../db/schema.js";
@@ -93,15 +94,16 @@ async function ensureWebhookRegistered(
  */
 export { ensureWebhookRegistered };
 
-/** Signing secret for verifying incoming webhook signatures by orgId. */
+/** Signing secret for verifying incoming webhook signatures by orgId or telenowOrgId. */
 export async function loadWebhookSigningSecret(orgId?: string): Promise<string | null> {
   if (orgId) {
     const [row] = await db
       .select({ signingSecret: telenowWebhooks.signingSecret })
       .from(telenowWebhooks)
-      .where(eq(telenowWebhooks.orgId, orgId))
+      .leftJoin(orgs, eq(telenowWebhooks.orgId, orgs.id))
+      .where(or(eq(telenowWebhooks.orgId, orgId), eq(orgs.telenowOrgId, orgId)))
       .limit(1);
-    return row?.signingSecret ?? null;
+    if (row?.signingSecret) return row.signingSecret;
   }
   const [row] = await db
     .select({ signingSecret: telenowWebhooks.signingSecret })
@@ -388,6 +390,7 @@ export async function provisionCourseOnTelenow(input: {
             variables: {
               user_name: rep.name?.trim() ?? "there",
               course_title: drill.title,
+              enrollment_id: enrollment.id,
             },
           };
         })
