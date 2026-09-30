@@ -110,8 +110,14 @@ const updateScheduleSchema = z.object({
 // Helpers
 // ---------------------------------------------------------------------------
 
-function isOwner(schedule: { ownerUserId: string }, user: PublicUser): boolean {
-  return schedule.ownerUserId === user.id;
+function isOwner(
+  schedule: { orgId: string; ownerUserId: string },
+  user: PublicUser,
+): boolean {
+  return (
+    schedule.ownerUserId === user.id ||
+    (user.role === "architect" && schedule.orgId === user.orgId)
+  );
 }
 
 async function schedulePublicView(
@@ -192,10 +198,15 @@ router.get("/schedule", authNonPractitioner, async (req: Request, res: Response)
   const user = req.user!;
 
   try {
+    const whereClause =
+      user.role === "architect" && user.orgId
+        ? eq(dailyCheckinSchedules.orgId, user.orgId)
+        : eq(dailyCheckinSchedules.ownerUserId, user.id);
+
     const schedules = await db
       .select()
       .from(dailyCheckinSchedules)
-      .where(eq(dailyCheckinSchedules.ownerUserId, user.id))
+      .where(whereClause)
       .orderBy(desc(dailyCheckinSchedules.createdAt));
 
     const [orgRow] = user.orgId

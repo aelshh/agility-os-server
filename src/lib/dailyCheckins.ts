@@ -330,6 +330,7 @@ export async function provisionDailyCheckinRun(runId: string): Promise<{
             user_name: person?.name?.trim() ?? "there",
             scheduler_name: owner?.name?.trim() ?? "your manager",
             date: run.runDate,
+            checkin_id: row.id,
           },
         };
       })
@@ -343,16 +344,18 @@ export async function provisionDailyCheckinRun(runId: string): Promise<{
       return { ok: true };
     }
 
-    const campaignId = await client.createCampaign({
-      name: `Check-in: ${schedule.title} — ${run.runDate}`,
+    const campaignPayload: Parameters<typeof client.createCampaign>[0] = {
+      name: `Check-in: ${schedule.title} - ${run.runDate}`,
       agentId,
       timezone: org.timezone,
       targets,
       source: `agilityos-checkin-${schedule.id}`,
-      startTimeLocal: "",
-      endTimeLocal: "",
-      fromNumberId: schedule.phoneNumberId ?? undefined,
-    });
+    };
+    if (schedule.phoneNumberId) {
+      campaignPayload.fromNumberId = schedule.phoneNumberId;
+    }
+
+    const campaignId = await client.createCampaign(campaignPayload);
 
     await db
       .update(dailyCheckinRuns)
