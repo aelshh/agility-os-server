@@ -12,6 +12,7 @@ import { hrmsRouter } from "./routes/hrms.js";
 import { invitesRouter } from "./routes/invites.js";
 import { orgsRouter } from "./routes/orgs.js";
 import { orgIntegrationsRouter } from "./routes/integrations.js";
+import { whatsappRouter } from "./routes/whatsapp.js";
 import { profileRouter } from "./routes/profile.js";
 import { verifyRouter } from "./routes/verify.js";
 import { webhooksRouter } from "./routes/webhooks.js";
@@ -59,6 +60,7 @@ app.get("/health", (_req: Request, res: Response) => {
 
 app.use("/api/auth", authRouter);
 app.use("/api/orgs", orgsRouter);
+app.use("/api/org/whatsapp", whatsappRouter);
 app.use("/api/org", orgIntegrationsRouter);
 app.use("/api/hrms", hrmsRouter);
 app.use("/api/invites", invitesRouter);

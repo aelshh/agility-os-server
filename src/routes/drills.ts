@@ -703,17 +703,19 @@ router.get(
         ? req.query["provider"].trim()
         : "elevenlabs";
 
-    const cacheKey = `${user.orgId}:${provider}`;
+    const cacheKey = `${user.orgId}:${provider.toLowerCase()}`;
     const now = Date.now();
     const cached = cachedVoicesMap.get(cacheKey);
-    if (cached && now - cached.timestamp < VOICES_CACHE_TTL_MS) {
+    if (cached && now - cached.timestamp < VOICES_CACHE_TTL_MS && (cached.voices as unknown[]).length > 0) {
       res.status(200).json({ voices: cached.voices });
       return;
     }
 
     try {
       const voices = await getAvailableVoices(user.orgId, provider);
-      cachedVoicesMap.set(cacheKey, { voices, timestamp: now });
+      if (voices.length > 0) {
+        cachedVoicesMap.set(cacheKey, { voices, timestamp: now });
+      }
       res.status(200).json({ voices });
     } catch (err) {
       if (err instanceof TelenowNotConfiguredError || (err as { status?: number })?.status === 428) {

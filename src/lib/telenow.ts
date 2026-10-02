@@ -292,6 +292,13 @@ export function parseVoice(
   const previewUrl =
     asString(raw, "preview_url") ?? asString(raw, "previewUrl") ?? undefined;
 
+  const rawDesc = asString(raw, "description") ?? asString(raw, "blurb");
+  const rawTags = Array.isArray(readKey(raw, "tags"))
+    ? (readKey(raw, "tags") as string[]).filter(Boolean).join(", ")
+    : undefined;
+
+  const finalDescription = description || rawDesc || rawTags || undefined;
+
   return {
     id,
     name: fullName,
@@ -300,7 +307,7 @@ export function parseVoice(
     gender,
     accent: accent ? accent.charAt(0).toUpperCase() + accent.slice(1) : undefined,
     language,
-    description,
+    description: finalDescription,
     previewUrl,
   };
 }
@@ -401,18 +408,83 @@ export class TelenowClient {
     return orgId;
   }
 
-  /** Fetches available voices for the specified provider from Telenow. */
-  async listVoices(provider = "elevenlabs"): Promise<TelenowVoiceOption[]> {
-    const json = await this.request("GET", `/api/providers/tts/${encodeURIComponent(provider)}/voices`);
-    const obj = asObj(json);
-    const list = Array.isArray(obj?.["data"])
-      ? (obj["data"] as Array<Record<string, unknown>>)
-      : Array.isArray(json)
-        ? (json as Array<Record<string, unknown>>)
-        : [];
-    if (list.length > 0) {
-      return list.map((item) => parseVoice(item, provider));
+  /** Fetches the full Telenow catalog (GET /api/catalog). */
+  async getCatalog(): Promise<Record<string, unknown> | null> {
+    try {
+      const json = await this.request("GET", "/api/catalog");
+      const data = unwrapEnvelope(json);
+      return asObj(data);
+    } catch (err) {
+      console.warn("[telenow] failed to fetch catalog", err);
+      return null;
     }
+  }
+
+  /** Fetches available voices for the specified provider from Telenow with dual-tier fallback. */
+  async listVoices(provider = "elevenlabs"): Promise<TelenowVoiceOption[]> {
+    const normalizedProvider = provider.trim().toLowerCase();
+
+    // Tier 1: Try live provider voice query
+    try {
+      const json = await this.request(
+        "GET",
+        `/api/providers/tts/${encodeURIComponent(normalizedProvider)}/voices`,
+      );
+      const obj = asObj(json);
+      const source = asString(obj, "source");
+      const rawList = Array.isArray(obj?.["data"])
+        ? (obj["data"] as Array<Record<string, unknown>>)
+        : Array.isArray(json)
+          ? (json as Array<Record<string, unknown>>)
+          : [];
+
+      // If live endpoint answered with voices, return them
+      if (source === "live" && rawList.length > 0) {
+        return rawList.map((item) => parseVoice(item, normalizedProvider));
+      }
+
+      // If response has voices and source is not fallback, return them
+      if (rawList.length > 0 && source !== "fallback") {
+        return rawList.map((item) => parseVoice(item, normalizedProvider));
+      }
+    } catch (err) {
+      console.warn(
+        `[telenow] live voice fetch for provider '${normalizedProvider}' failed, falling back to catalog`,
+        err,
+      );
+    }
+
+    // Tier 2: Fetch curated voices from central catalog
+    try {
+      const catalog = await this.getCatalog();
+      if (catalog) {
+        const ttsProviders = Array.isArray(catalog["tts"])
+          ? (catalog["tts"] as Array<Record<string, unknown>>)
+          : [];
+        const prov = ttsProviders.find(
+          (p) =>
+            String(readKey(p, "id") ?? "")
+              .trim()
+              .toLowerCase() === normalizedProvider,
+        );
+        if (prov) {
+          const catalogVoices = Array.isArray(readKey(prov, "voices"))
+            ? (readKey(prov, "voices") as Array<Record<string, unknown>>)
+            : [];
+          if (catalogVoices.length > 0) {
+            return catalogVoices.map((item) =>
+              parseVoice(item, normalizedProvider),
+            );
+          }
+        }
+      }
+    } catch (catalogErr) {
+      console.warn(
+        `[telenow] catalog voice fetch for provider '${normalizedProvider}' failed`,
+        catalogErr,
+      );
+    }
+
     return [];
   }
 
@@ -835,8 +907,190 @@ export class TelenowClient {
   }
 
   // -------------------------------------------------------------------------
-  // WhatsApp Messaging (telenow.ai/docs/wa-overview)
+  // WhatsApp Messaging & Channel Pairing (telenow.ai/docs/wa-overview)
   // -------------------------------------------------------------------------
+
+  /**
+   * Initiates a new WhatsApp QR pairing session.
+   */
+  async createWhatsAppSession(
+    label?: string,
+    orgId?: string,
+  ): Promise<{
+    sessionId: string;
+    status: string;
+    qr?: string | null;
+  }> {
+    const targetOrgId = orgId ?? (await this.resolveOrgId());
+    const payload = {
+      label: label?.trim() || "AgilityOS Channel",
+      name: label?.trim() || "AgilityOS Channel",
+    };
+
+    const candidateEndpoints = [
+      `/api/orgs/${targetOrgId}/whatsapp/sessions`,
+      `/api/app-whatsapp/sessions`,
+      `/api/whatsapp/sessions`,
+      `/api/orgs/${targetOrgId}/whatsapp-hub/sessions`,
+    ];
+
+    let lastErr: unknown = null;
+    for (const endpoint of candidateEndpoints) {
+      try {
+        const json = await this.request(
+          "POST",
+          endpoint,
+          payload,
+          undefined,
+          { "X-Org-Id": targetOrgId },
+        );
+        const data = asObj(unwrapEnvelope(json));
+        const sessionId =
+          asString(data, "id") ||
+          asString(data, "sessionId") ||
+          asString(data, "session_id") ||
+          asString(data, "sid");
+
+        if (sessionId) {
+          const status = asString(data, "status") || "qr_ready";
+          const qr = asString(data, "qr") || asString(data, "qrCode") || asString(data, "qr_code") || null;
+          return { sessionId, status, qr };
+        }
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+
+    throw lastErr instanceof Error
+      ? lastErr
+      : new TelenowError("Failed to initiate WhatsApp pairing session.");
+  }
+
+  /**
+   * Retrieves status and QR payload for an active pairing session.
+   */
+  async getWhatsAppSession(
+    sessionId: string,
+    orgId?: string,
+  ): Promise<{
+    sessionId: string;
+    status: string;
+    qr?: string | null;
+    phone?: string | null;
+    channelId?: string | null;
+  }> {
+    const targetOrgId = orgId ?? (await this.resolveOrgId());
+
+    const candidateEndpoints = [
+      `/api/orgs/${targetOrgId}/whatsapp/sessions/${sessionId}`,
+      `/api/app-whatsapp/sessions/${sessionId}`,
+      `/api/whatsapp/sessions/${sessionId}`,
+      `/api/orgs/${targetOrgId}/whatsapp-hub/sessions/${sessionId}`,
+    ];
+
+    let lastErr: unknown = null;
+    for (const endpoint of candidateEndpoints) {
+      try {
+        const json = await this.request(
+          "GET",
+          endpoint,
+          undefined,
+          undefined,
+          { "X-Org-Id": targetOrgId },
+        );
+        const data = asObj(unwrapEnvelope(json));
+        if (data) {
+          const sid =
+            asString(data, "id") ||
+            asString(data, "sessionId") ||
+            asString(data, "session_id") ||
+            sessionId;
+          const status = asString(data, "status") || "qr_ready";
+          const qr = asString(data, "qr") || asString(data, "qrCode") || asString(data, "qr_code") || null;
+          const phone = asString(data, "phone") || asString(data, "number") || asString(data, "e164") || null;
+          const channelId = asString(data, "channelId") || asString(data, "channel_id") || null;
+          return { sessionId: sid, status, qr, phone, channelId };
+        }
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+
+    throw lastErr instanceof Error
+      ? lastErr
+      : new TelenowError(`Failed to fetch WhatsApp session ${sessionId}.`);
+  }
+
+  /**
+   * Deletes / cancels an active WhatsApp pairing session.
+   */
+  async deleteWhatsAppSession(
+    sessionId: string,
+    orgId?: string,
+  ): Promise<{ success: boolean }> {
+    const targetOrgId = orgId ?? (await this.resolveOrgId());
+
+    const candidateEndpoints = [
+      `/api/orgs/${targetOrgId}/whatsapp/sessions/${sessionId}`,
+      `/api/app-whatsapp/sessions/${sessionId}`,
+      `/api/whatsapp/sessions/${sessionId}`,
+      `/api/orgs/${targetOrgId}/whatsapp-hub/sessions/${sessionId}`,
+    ];
+
+    for (const endpoint of candidateEndpoints) {
+      try {
+        await this.request(
+          "DELETE",
+          endpoint,
+          undefined,
+          undefined,
+          { "X-Org-Id": targetOrgId },
+        );
+        return { success: true };
+      } catch (err) {
+        // continue
+      }
+    }
+
+    return { success: true };
+  }
+
+  /**
+   * Disconnects and removes a WhatsApp channel.
+   */
+  async deleteWhatsAppChannel(
+    channelId: string,
+    orgId?: string,
+  ): Promise<{ success: boolean }> {
+    const targetOrgId = orgId ?? (await this.resolveOrgId());
+
+    const candidateEndpoints = [
+      `/api/app-whatsapp/channels/${channelId}`,
+      `/api/orgs/${targetOrgId}/whatsapp-hub/channels/${channelId}`,
+      `/api/orgs/${targetOrgId}/whatsapp-cloud/channels/${channelId}`,
+      `/api/whatsapp/channels/${channelId}`,
+    ];
+
+    let lastErr: unknown = null;
+    for (const endpoint of candidateEndpoints) {
+      try {
+        await this.request(
+          "DELETE",
+          endpoint,
+          undefined,
+          undefined,
+          { "X-Org-Id": targetOrgId },
+        );
+        return { success: true };
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+
+    throw lastErr instanceof Error
+      ? lastErr
+      : new TelenowError(`Failed to disconnect WhatsApp channel ${channelId}.`);
+  }
 
   /** Lists active WhatsApp channels connected to this organization. */
   async listWhatsAppChannels(orgId?: string): Promise<
