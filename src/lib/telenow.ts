@@ -929,9 +929,9 @@ export class TelenowClient {
 
     const candidateEndpoints = [
       `/api/orgs/${targetOrgId}/whatsapp/sessions`,
+      `/api/orgs/${targetOrgId}/whatsapp-cloud/sessions`,
       `/api/app-whatsapp/sessions`,
       `/api/whatsapp/sessions`,
-      `/api/orgs/${targetOrgId}/whatsapp-hub/sessions`,
     ];
 
     let lastErr: unknown = null;
@@ -944,16 +944,31 @@ export class TelenowClient {
           undefined,
           { "X-Org-Id": targetOrgId },
         );
-        const data = asObj(unwrapEnvelope(json));
+        const data = asObj(unwrapEnvelope(json)) ?? asObj(json);
+        const target = asObj(readKey(data ?? {}, "session")) ?? data;
+
         const sessionId =
+          asString(target, "id") ||
+          asString(target, "sessionId") ||
+          asString(target, "session_id") ||
+          asString(target, "sid") ||
           asString(data, "id") ||
           asString(data, "sessionId") ||
-          asString(data, "session_id") ||
           asString(data, "sid");
 
         if (sessionId) {
-          const status = asString(data, "status") || "qr_ready";
-          const qr = asString(data, "qr") || asString(data, "qrCode") || asString(data, "qr_code") || null;
+          const qr =
+            asString(target, "qr") ||
+            asString(target, "qrCode") ||
+            asString(target, "qr_code") ||
+            asString(target, "qrcode") ||
+            asString(data, "qr") ||
+            asString(data, "qrCode") ||
+            null;
+          const status =
+            asString(target, "status") ||
+            asString(data, "status") ||
+            (qr ? "qr_ready" : "created");
           return { sessionId, status, qr };
         }
       } catch (err) {
@@ -983,9 +998,9 @@ export class TelenowClient {
 
     const candidateEndpoints = [
       `/api/orgs/${targetOrgId}/whatsapp/sessions/${sessionId}`,
+      `/api/orgs/${targetOrgId}/whatsapp-cloud/sessions/${sessionId}`,
       `/api/app-whatsapp/sessions/${sessionId}`,
       `/api/whatsapp/sessions/${sessionId}`,
-      `/api/orgs/${targetOrgId}/whatsapp-hub/sessions/${sessionId}`,
     ];
 
     let lastErr: unknown = null;
@@ -998,17 +1013,37 @@ export class TelenowClient {
           undefined,
           { "X-Org-Id": targetOrgId },
         );
-        const data = asObj(unwrapEnvelope(json));
-        if (data) {
+        const data = asObj(unwrapEnvelope(json)) ?? asObj(json);
+        const target = asObj(readKey(data ?? {}, "session")) ?? data;
+
+        if (target) {
           const sid =
-            asString(data, "id") ||
-            asString(data, "sessionId") ||
-            asString(data, "session_id") ||
+            asString(target, "id") ||
+            asString(target, "sessionId") ||
+            asString(target, "session_id") ||
+            asString(target, "sid") ||
             sessionId;
-          const status = asString(data, "status") || "qr_ready";
-          const qr = asString(data, "qr") || asString(data, "qrCode") || asString(data, "qr_code") || null;
-          const phone = asString(data, "phone") || asString(data, "number") || asString(data, "e164") || null;
-          const channelId = asString(data, "channelId") || asString(data, "channel_id") || null;
+          const qr =
+            asString(target, "qr") ||
+            asString(target, "qrCode") ||
+            asString(target, "qr_code") ||
+            asString(data, "qr") ||
+            null;
+          const status =
+            asString(target, "status") ||
+            asString(data, "status") ||
+            (qr ? "qr_ready" : "created");
+          const phone =
+            asString(target, "phone") ||
+            asString(target, "number") ||
+            asString(target, "e164") ||
+            asString(data, "phone") ||
+            null;
+          const channelId =
+            asString(target, "channelId") ||
+            asString(target, "channel_id") ||
+            asString(data, "channelId") ||
+            null;
           return { sessionId: sid, status, qr, phone, channelId };
         }
       } catch (err) {
@@ -1032,9 +1067,9 @@ export class TelenowClient {
 
     const candidateEndpoints = [
       `/api/orgs/${targetOrgId}/whatsapp/sessions/${sessionId}`,
+      `/api/orgs/${targetOrgId}/whatsapp-cloud/sessions/${sessionId}`,
       `/api/app-whatsapp/sessions/${sessionId}`,
       `/api/whatsapp/sessions/${sessionId}`,
-      `/api/orgs/${targetOrgId}/whatsapp-hub/sessions/${sessionId}`,
     ];
 
     for (const endpoint of candidateEndpoints) {
@@ -1065,7 +1100,9 @@ export class TelenowClient {
     const targetOrgId = orgId ?? (await this.resolveOrgId());
 
     const candidateEndpoints = [
+      `/api/orgs/${targetOrgId}/whatsapp/sessions/${channelId}`,
       `/api/app-whatsapp/channels/${channelId}`,
+      `/api/v1/integrations/connections/${channelId}`,
       `/api/orgs/${targetOrgId}/whatsapp-hub/channels/${channelId}`,
       `/api/orgs/${targetOrgId}/whatsapp-cloud/channels/${channelId}`,
       `/api/whatsapp/channels/${channelId}`,
@@ -1092,7 +1129,7 @@ export class TelenowClient {
       : new TelenowError(`Failed to disconnect WhatsApp channel ${channelId}.`);
   }
 
-  /** Lists active WhatsApp channels connected to this organization. */
+  /** Lists active WhatsApp channels connected to this organization from all Telenow surfaces. */
   async listWhatsAppChannels(orgId?: string): Promise<
     Array<{
       id: string;
@@ -1103,15 +1140,185 @@ export class TelenowClient {
     }>
   > {
     const targetOrgId = orgId ?? (await this.resolveOrgId());
+    const channelMap = new Map<
+      string,
+      {
+        id: string;
+        name: string;
+        phone: string;
+        status: string;
+        qualityRating?: string;
+      }
+    >();
 
-    const candidateEndpoints = [
-      `/api/app-whatsapp/channels`,
+    // 1. Check WhatsApp Sessions (GET /api/orgs/{orgId}/whatsapp/sessions)
+    try {
+      const json = await this.request(
+        "GET",
+        `/api/orgs/${targetOrgId}/whatsapp/sessions`,
+        undefined,
+        undefined,
+        { "X-Org-Id": targetOrgId },
+      );
+      const data = asObj(unwrapEnvelope(json)) ?? asObj(json);
+      const rawList = Array.isArray(readKey(data ?? {}, "sessions"))
+        ? (readKey(data ?? {}, "sessions") as Array<Record<string, unknown>>)
+        : Array.isArray(data)
+          ? (data as Array<Record<string, unknown>>)
+          : Array.isArray(json)
+            ? (json as Array<Record<string, unknown>>)
+            : [];
+
+      for (const item of rawList) {
+        const id = String(
+          readKey(item, "id") ??
+            readKey(item, "sessionId") ??
+            readKey(item, "sid") ??
+            "",
+        );
+        if (!id) continue;
+        const phone = String(
+          readKey(item, "phone") ??
+            readKey(item, "number") ??
+            readKey(item, "e164") ??
+            readKey(item, "jid") ??
+            "",
+        );
+        const name = String(
+          readKey(item, "label") ??
+            readKey(item, "name") ??
+            readKey(item, "displayName") ??
+            (phone ? `WhatsApp (${phone})` : "WhatsApp Session"),
+        );
+        const status = String(readKey(item, "status") ?? "active");
+        if (status === "deleted") continue;
+
+        channelMap.set(id, {
+          id,
+          name,
+          phone,
+          status,
+          qualityRating: status === "connected" ? "Connected" : status,
+        });
+      }
+    } catch {
+      // ignore
+    }
+
+    // 2. Check App-WhatsApp Channels (GET /api/app-whatsapp/channels)
+    try {
+      const json = await this.request(
+        "GET",
+        "/api/app-whatsapp/channels",
+        undefined,
+        undefined,
+        { "X-Org-Id": targetOrgId },
+      );
+      const data = asObj(unwrapEnvelope(json)) ?? asObj(json);
+      const rawList = Array.isArray(readKey(data ?? {}, "channels"))
+        ? (readKey(data ?? {}, "channels") as Array<Record<string, unknown>>)
+        : Array.isArray(data)
+          ? (data as Array<Record<string, unknown>>)
+          : Array.isArray(json)
+            ? (json as Array<Record<string, unknown>>)
+            : [];
+
+      for (const item of rawList) {
+        const id = String(
+          readKey(item, "id") ??
+            readKey(item, "channelId") ??
+            readKey(item, "channel_id") ??
+            "",
+        );
+        if (!id) continue;
+        const phone = String(
+          readKey(item, "phone") ??
+            readKey(item, "e164") ??
+            readKey(item, "number") ??
+            "",
+        );
+        const name = String(
+          readKey(item, "label") ??
+            readKey(item, "name") ??
+            readKey(item, "displayName") ??
+            "WhatsApp Channel",
+        );
+        const qr =
+          asString(item, "qualityRating") ?? asString(item, "quality_rating");
+        const status = String(readKey(item, "status") ?? "active");
+
+        channelMap.set(id, {
+          id,
+          name,
+          phone,
+          status,
+          qualityRating: qr || undefined,
+        });
+      }
+    } catch {
+      // ignore
+    }
+
+    // 3. Check Workspace Integration Connections (GET /api/v1/integrations/connections)
+    try {
+      const json = await this.request("GET", "/api/v1/integrations/connections");
+      const data = asObj(unwrapEnvelope(json)) ?? asObj(json);
+      const rawList = Array.isArray(readKey(data ?? {}, "connections"))
+        ? (readKey(data ?? {}, "connections") as Array<Record<string, unknown>>)
+        : Array.isArray(data)
+          ? (data as Array<Record<string, unknown>>)
+          : Array.isArray(json)
+            ? (json as Array<Record<string, unknown>>)
+            : [];
+
+      for (const conn of rawList) {
+        const providerId = String(readKey(conn, "providerId") ?? "").toLowerCase();
+        if (
+          providerId.includes("whatsapp") ||
+          providerId === "aisensy" ||
+          providerId === "gupshup"
+        ) {
+          const id = String(readKey(conn, "id") ?? "");
+          if (!id) continue;
+          const label = String(
+            readKey(conn, "label") ??
+              readKey(conn, "name") ??
+              "WhatsApp Integration",
+          );
+          const settings = asObj(readKey(conn, "settings")) ?? {};
+          const phone = String(
+            readKey(settings, "phone") ??
+              readKey(settings, "number") ??
+              readKey(settings, "sender") ??
+              readKey(settings, "account") ??
+              "",
+          );
+          const status = String(readKey(conn, "status") ?? "active");
+
+          if (!channelMap.has(id)) {
+            channelMap.set(id, {
+              id,
+              name: label,
+              phone,
+              status,
+              qualityRating: "Connected",
+            });
+          }
+        }
+      }
+    } catch {
+      // ignore
+    }
+
+    // 4. Check WhatsApp Hub / Cloud Channels fallback
+    const fallbackEndpoints = [
       `/api/orgs/${targetOrgId}/whatsapp-hub/channels`,
       `/api/orgs/${targetOrgId}/whatsapp-cloud/channels`,
+      `/api/orgs/${targetOrgId}/whatsapp-cloud/accounts`,
       `/api/whatsapp/channels`,
     ];
 
-    for (const endpoint of candidateEndpoints) {
+    for (const endpoint of fallbackEndpoints) {
       try {
         const json = await this.request(
           "GET",
@@ -1120,40 +1327,55 @@ export class TelenowClient {
           undefined,
           { "X-Org-Id": targetOrgId },
         );
-        const data = asObj(unwrapEnvelope(json));
+        const data = asObj(unwrapEnvelope(json)) ?? asObj(json);
         const list = Array.isArray(readKey(data ?? {}, "channels"))
           ? (readKey(data ?? {}, "channels") as Array<Record<string, unknown>>)
-          : Array.isArray(data)
-            ? (data as Array<Record<string, unknown>>)
-            : Array.isArray(json)
-              ? (json as Array<Record<string, unknown>>)
-              : [];
+          : Array.isArray(readKey(data ?? {}, "accounts"))
+            ? (readKey(data ?? {}, "accounts") as Array<Record<string, unknown>>)
+            : Array.isArray(data)
+              ? (data as Array<Record<string, unknown>>)
+              : Array.isArray(json)
+                ? (json as Array<Record<string, unknown>>)
+                : [];
 
-        if (list.length > 0) {
-          return list.map((item) => {
-            const qr = asString(item, "qualityRating") ?? asString(item, "quality_rating");
-            const channelObj: {
-              id: string;
-              name: string;
-              phone: string;
-              status: string;
-              qualityRating?: string;
-            } = {
-              id: String(readKey(item, "id") ?? readKey(item, "channelId") ?? readKey(item, "channel_id") ?? ""),
-              name: String(readKey(item, "name") ?? readKey(item, "displayName") ?? readKey(item, "display_name") ?? "WhatsApp Channel"),
-              phone: String(readKey(item, "phone") ?? readKey(item, "e164") ?? readKey(item, "number") ?? ""),
-              status: String(readKey(item, "status") ?? "active"),
-            };
-            if (qr) channelObj.qualityRating = qr;
-            return channelObj;
+        for (const item of list) {
+          const id = String(
+            readKey(item, "id") ??
+              readKey(item, "channelId") ??
+              readKey(item, "waba_id") ??
+              "",
+          );
+          if (!id || channelMap.has(id)) continue;
+          const phone = String(
+            readKey(item, "phone") ??
+              readKey(item, "e164") ??
+              readKey(item, "number") ??
+              readKey(item, "display_phone_number") ??
+              "",
+          );
+          const name = String(
+            readKey(item, "name") ??
+              readKey(item, "label") ??
+              readKey(item, "displayName") ??
+              "WhatsApp Channel",
+          );
+          const status = String(readKey(item, "status") ?? "active");
+          const qr = asString(item, "qualityRating") ?? asString(item, "quality_rating");
+
+          channelMap.set(id, {
+            id,
+            name,
+            phone,
+            status,
+            qualityRating: qr || undefined,
           });
         }
-      } catch (err) {
-        // continue to next endpoint
+      } catch {
+        // continue
       }
     }
 
-    return [];
+    return Array.from(channelMap.values());
   }
 
   /**
