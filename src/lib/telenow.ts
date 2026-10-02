@@ -28,7 +28,7 @@ const DEFAULT_API_BASE = process.env["TELENOW_API_BASE"] ?? "https://api.telenow
 
 const VOICE_STACK = {
   llmProvider: process.env["TELENOW_LLM_PROVIDER"] ?? "openai",
-  llmModel: process.env["TELENOW_LLM_MODEL"] ?? "gpt-4o-mini",
+  llmModel: process.env["TELENOW_LLM_MODEL"] ?? "gpt-5.4-mini",
   sttProvider: process.env["TELENOW_STT_PROVIDER"] ?? "deepgram",
   ttsProvider: process.env["TELENOW_TTS_PROVIDER"] ?? "elevenlabs",
   ttsVoice: process.env["TELENOW_TTS_VOICE"] ?? "EXAVITQu4vr4xnSDxMaL",
@@ -562,6 +562,14 @@ export const FALLBACK_VOICES: TelenowVoiceOption[] = [
   },
 ];
 
+export function normalizeE164Phone(phone: string): string {
+  let cleaned = phone.replace(/[\s\(\)\-\.]/g, "");
+  if (!cleaned.startsWith("+")) {
+    cleaned = `+${cleaned}`;
+  }
+  return cleaned;
+}
+
 export class TelenowClient {
   constructor(
     readonly apiKey: string,
@@ -581,6 +589,8 @@ export class TelenowClient {
   ): Promise<unknown> {
     const headers: Record<string, string> = {
       "X-API-Key": this.apiKey,
+      "X-App-Key": this.apiKey,
+      Authorization: `Bearer ${this.apiKey}`,
     };
     if (extraHeaders) {
       for (const [k, v] of Object.entries(extraHeaders)) {
@@ -1074,6 +1084,221 @@ export class TelenowClient {
           ? (readKey(item, "matches") as boolean)
           : null,
     }));
+  }
+
+  // -------------------------------------------------------------------------
+  // WhatsApp Messaging (telenow.ai/docs/wa-overview)
+  // -------------------------------------------------------------------------
+
+  /** Lists active WhatsApp channels connected to this organization. */
+  async listWhatsAppChannels(orgId?: string): Promise<
+    Array<{
+      id: string;
+      name: string;
+      phone: string;
+      status: string;
+      qualityRating?: string;
+    }>
+  > {
+    const targetOrgId = orgId ?? (await this.resolveOrgId());
+
+    const candidateEndpoints = [
+      `/api/app-whatsapp/channels`,
+      `/api/orgs/${targetOrgId}/whatsapp-hub/channels`,
+      `/api/orgs/${targetOrgId}/whatsapp-cloud/channels`,
+      `/api/whatsapp/channels`,
+    ];
+
+    for (const endpoint of candidateEndpoints) {
+      try {
+        const json = await this.request(
+          "GET",
+          endpoint,
+          undefined,
+          undefined,
+          { "X-Org-Id": targetOrgId },
+        );
+        const data = asObj(unwrapEnvelope(json));
+        const list = Array.isArray(readKey(data ?? {}, "channels"))
+          ? (readKey(data ?? {}, "channels") as Array<Record<string, unknown>>)
+          : Array.isArray(data)
+            ? (data as Array<Record<string, unknown>>)
+            : Array.isArray(json)
+              ? (json as Array<Record<string, unknown>>)
+              : [];
+
+        if (list.length > 0) {
+          return list.map((item) => {
+            const qr = asString(item, "qualityRating") ?? asString(item, "quality_rating");
+            const channelObj: {
+              id: string;
+              name: string;
+              phone: string;
+              status: string;
+              qualityRating?: string;
+            } = {
+              id: String(readKey(item, "id") ?? readKey(item, "channelId") ?? readKey(item, "channel_id") ?? ""),
+              name: String(readKey(item, "name") ?? readKey(item, "displayName") ?? readKey(item, "display_name") ?? "WhatsApp Channel"),
+              phone: String(readKey(item, "phone") ?? readKey(item, "e164") ?? readKey(item, "number") ?? ""),
+              status: String(readKey(item, "status") ?? "active"),
+            };
+            if (qr) channelObj.qualityRating = qr;
+            return channelObj;
+          });
+        }
+      } catch (err) {
+        // continue to next endpoint
+      }
+    }
+
+    return [];
+  }
+
+  /**
+   * Uploads a file (PDF, document, image, video) to Telenow's WhatsApp channel
+   * and returns the resulting mediaId for delivery.
+   */
+  async uploadWhatsAppMedia(
+    channelId: string,
+    fileBuffer: Buffer,
+    fileName: string,
+    mimeType: string,
+    orgId?: string,
+  ): Promise<{ mediaId: string; mime: string; filename: string }> {
+    const targetOrgId = orgId ?? (await this.resolveOrgId());
+    const form = new FormData();
+    const blob = new Blob([new Uint8Array(fileBuffer)], {
+      type: mimeType || "application/octet-stream",
+    });
+    form.append("file", blob, fileName);
+
+    const candidateEndpoints = [
+      `/api/app-whatsapp/channels/${channelId}/media`,
+      `/api/orgs/${targetOrgId}/whatsapp-hub/channels/${channelId}/media`,
+    ];
+
+    let lastErr: unknown = null;
+    for (const endpoint of candidateEndpoints) {
+      try {
+        const json = await this.request(
+          "POST",
+          endpoint,
+          form,
+          undefined,
+          { "X-Org-Id": targetOrgId },
+        );
+
+        const data = asObj(unwrapEnvelope(json));
+        const mediaId = asString(data, "mediaId") ?? asString(data, "id");
+        if (mediaId) {
+          return {
+            mediaId,
+            mime: asString(data, "mime") || mimeType,
+            filename: asString(data, "filename") || fileName,
+          };
+        }
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+
+    throw lastErr instanceof Error ? lastErr : new TelenowError("Failed to upload WhatsApp media.");
+  }
+
+  /**
+   * Sends a text message or media attachment over WhatsApp.
+   */
+  async sendWhatsAppMessage(
+    input: {
+      channelId?: string;
+      to: string;
+      message?: string;
+      mediaId?: string;
+      caption?: string;
+      replyTo?: string;
+    },
+    orgId?: string,
+  ): Promise<{ wamid: string }> {
+    const targetOrgId = orgId ?? (await this.resolveOrgId());
+    let channelId = input.channelId;
+
+    // If channelId was not provided, auto-resolve the first active WhatsApp channel
+    if (!channelId) {
+      const channels = await this.listWhatsAppChannels(targetOrgId);
+      if (channels.length > 0 && channels[0]?.id) {
+        channelId = channels[0].id;
+      }
+    }
+
+    if (!channelId) {
+      throw new TelenowError(
+        "No active WhatsApp channel is configured for your organization in Telenow. Please connect a WhatsApp channel in your Telenow workspace settings.",
+      );
+    }
+
+    const normalizedTo = normalizeE164Phone(input.to);
+
+    const payload: Record<string, unknown> = {
+      channelId,
+      to: normalizedTo,
+    };
+
+    if (input.mediaId) {
+      payload["mediaId"] = input.mediaId;
+      if (input.caption?.trim()) {
+        payload["caption"] = input.caption.trim();
+      }
+    } else if (input.message) {
+      payload["message"] = input.message.trim();
+    } else {
+      throw new TelenowError("WhatsApp message must contain either text message or mediaId.");
+    }
+
+    if (input.replyTo?.trim()) {
+      payload["reply_to"] = input.replyTo.trim();
+    }
+
+    // Try App-Key endpoint first
+    try {
+      const json = await this.request(
+        "POST",
+        "/api/app-whatsapp/send",
+        payload,
+        undefined,
+        { "X-Org-Id": targetOrgId },
+      );
+
+      const data = asObj(unwrapEnvelope(json));
+      const wamid = asString(data, "wamid") || asString(data, "id") || "wamid.success";
+      return { wamid };
+    } catch (appErr) {
+      // Try Hub endpoint fallback
+      try {
+        const hubPayload: Record<string, unknown> = {
+          to: normalizedTo,
+        };
+        if (input.mediaId) {
+          hubPayload["mediaId"] = input.mediaId;
+          if (input.caption?.trim()) hubPayload["caption"] = input.caption.trim();
+        } else if (input.message) {
+          hubPayload["message"] = input.message.trim();
+          hubPayload["text"] = input.message.trim();
+        }
+
+        const hubJson = await this.request(
+          "POST",
+          `/api/orgs/${targetOrgId}/whatsapp-hub/channels/${channelId}/send`,
+          hubPayload,
+          undefined,
+          { "X-Org-Id": targetOrgId },
+        );
+        const hubData = asObj(unwrapEnvelope(hubJson));
+        const wamid = asString(hubData, "wamid") || asString(hubData, "id") || "wamid.success";
+        return { wamid };
+      } catch (hubErr) {
+        throw appErr instanceof TelenowError ? appErr : hubErr;
+      }
+    }
   }
 }
 
