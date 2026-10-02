@@ -81,7 +81,7 @@ export const dailyCheckinSchedules = pgTable(
     telenowAgentId: varchar("telenow_agent_id", { length: 255 }),
 
     /** Voice persona ID (ElevenLabs voice ID or provider voice ID). */
-    voice: varchar("voice", { length: 255 }).notNull().default("EXAVITQu4vr4xnSDxMaL"),
+    voice: varchar("voice", { length: 255 }).notNull().default(""),
 
     /** Voice TTS provider (e.g. elevenlabs, cartesia, openai). */
     voiceProvider: varchar("voice_provider", { length: 50 }).notNull().default("elevenlabs"),

@@ -33,7 +33,12 @@ import {
   resolveDirectReports,
 } from "../lib/dailyCheckins.js";
 import { isValidTimeLabel, zonedNow } from "../lib/timezone.js";
-import { isOrgTelenowConfigured, getTelenowClientForOrg, getAvailableVoices } from "../lib/telenow.js";
+import {
+  isOrgTelenowConfigured,
+  getTelenowClientForOrg,
+  getAvailableVoices,
+  TelenowNotConfiguredError,
+} from "../lib/telenow.js";
 import { requireAuth } from "../middleware/requireAuth.js";
 
 const router = Router();
@@ -74,8 +79,8 @@ const createScheduleSchema = z.object({
     .trim()
     .max(4000, "Call script cannot exceed 4000 characters")
     .optional(),
-  voice: z.string().trim().max(255).optional(),
-  voiceProvider: z.string().trim().max(50).optional(),
+  voice: z.string().trim().min(1, "A voice persona selection is required."),
+  voiceProvider: z.string().trim().min(1, "A voice provider is required."),
   phoneNumberId: z.string().trim().max(255).nullable().optional(),
   phoneNumber: z.string().trim().max(50).nullable().optional(),
   additionalUserIds: z.array(z.string().uuid()).optional(),
@@ -251,16 +256,29 @@ router.get("/schedule", authNonPractitioner, async (req: Request, res: Response)
 
 router.get("/voices", authNonPractitioner, async (req: Request, res: Response) => {
   const user = req.user!;
+  if (!user || !user.orgId) {
+    res.status(401).json({ message: "Not authenticated" });
+    return;
+  }
   try {
     const provider =
-      typeof req.query["provider"] === "string"
-        ? req.query["provider"]
+      typeof req.query["provider"] === "string" && req.query["provider"].trim().length > 0
+        ? req.query["provider"].trim()
         : "elevenlabs";
-    const voices = await getAvailableVoices(user.orgId ?? undefined, provider);
+    const voices = await getAvailableVoices(user.orgId, provider);
     res.status(200).json({ voices });
   } catch (err) {
+    if (err instanceof TelenowNotConfiguredError || (err as { status?: number })?.status === 428) {
+      res.status(428).json({
+        code: "TELENOW_NOT_CONFIGURED",
+        message:
+          (err as Error).message ||
+          "Telenow Voice AI is not configured for your organisation. Please add an API key in Organisation Settings.",
+      });
+      return;
+    }
     console.error("[checkins] GET /voices failed", err);
-    res.status(500).json({ message: "Failed to load voices." });
+    res.status(500).json({ message: (err as Error).message || "Failed to load voices from Telenow." });
   }
 });
 

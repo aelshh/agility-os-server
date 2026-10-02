@@ -30,8 +30,6 @@ const VOICE_STACK = {
   llmProvider: process.env["TELENOW_LLM_PROVIDER"] ?? "openai",
   llmModel: process.env["TELENOW_LLM_MODEL"] ?? "gpt-5.4-mini",
   sttProvider: process.env["TELENOW_STT_PROVIDER"] ?? "deepgram",
-  ttsProvider: process.env["TELENOW_TTS_PROVIDER"] ?? "elevenlabs",
-  ttsVoice: process.env["TELENOW_TTS_VOICE"] ?? "EXAVITQu4vr4xnSDxMaL",
 };
 
 const CAMPAIGN_CONCURRENCY =
@@ -307,261 +305,6 @@ export function parseVoice(
   };
 }
 
-export const FALLBACK_VOICES: TelenowVoiceOption[] = [
-  {
-    id: "EXAVITQu4vr4xnSDxMaL",
-    name: "Sarah - Mature, Reassuring, Confident",
-    displayName: "Sarah",
-    provider: "elevenlabs",
-    gender: "female",
-    accent: "American",
-    language: "en",
-    description: "Mature, Reassuring, Confident",
-    previewUrl:
-      "https://storage.googleapis.com/eleven-public-prod/premade/voices/EXAVITQu4vr4xnSDxMaL/01a3e33c-6e99-4ee7-8543-ff2216a32186.mp3",
-  },
-  {
-    id: "CwhRBWXzGAHq8TQ4Fs17",
-    name: "Roger - Laid-Back, Casual, Resonant",
-    displayName: "Roger",
-    provider: "elevenlabs",
-    gender: "male",
-    accent: "American",
-    language: "en",
-    description: "Laid-Back, Casual, Resonant",
-    previewUrl:
-      "https://storage.googleapis.com/eleven-public-prod/premade/voices/CwhRBWXzGAHq8TQ4Fs17/58ee3ff5-f6f2-4628-93b8-e38eb31806b0.mp3",
-  },
-  {
-    id: "FGY2WhTYpPnrIDTdsKH5",
-    name: "Laura - Enthusiast, Quirky Attitude",
-    displayName: "Laura",
-    provider: "elevenlabs",
-    gender: "female",
-    accent: "American",
-    language: "en",
-    description: "Enthusiast, Quirky Attitude",
-    previewUrl:
-      "https://api.us.elevenlabs.io/v1/voices/FGY2WhTYpPnrIDTdsKH5/previews/audio?payload=eyJ2b2ljZV9zb3VyY2UiOiJwcmVtYWRlIiwiZmlsZW5hbWUiOiI2NzM0MTc1OS1hZDA4LTQxYTUtYmU2ZS1kZTEyZmU0NDg2MTgubXAzIiwidGltZXN0YW1wIjoxNzkwNTkzMjAwMDAwMDAwfQ%3D%3D",
-  },
-  {
-    id: "IKne3meq5aSn9XLyUdCD",
-    name: "Charlie - Deep, Confident, Energetic",
-    displayName: "Charlie",
-    provider: "elevenlabs",
-    gender: "male",
-    accent: "Australian",
-    language: "en",
-    description: "Deep, Confident, Energetic",
-    previewUrl:
-      "https://api.us.elevenlabs.io/v1/voices/IKne3meq5aSn9XLyUdCD/previews/audio?payload=eyJ2b2ljZV9zb3VyY2UiOiJwcmVtYWRlIiwiZmlsZW5hbWUiOiIxMDJkZTZmMi0yMmVkLTQzZTAtYTFmMS0xMTFmYTc1YzU0ODEubXAzIiwidGltZXN0YW1wIjoxNzkwNTkzMjAwMDAwMDAwfQ%3D%3D",
-  },
-  {
-    id: "JBFqnCBsd6RMkjVDRZzb",
-    name: "George - Warm, Captivating Storyteller",
-    displayName: "George",
-    provider: "elevenlabs",
-    gender: "male",
-    accent: "British",
-    language: "en",
-    description: "Warm, Captivating Storyteller",
-    previewUrl:
-      "https://api.us.elevenlabs.io/v1/voices/JBFqnCBsd6RMkjVDRZzb/previews/audio?payload=eyJ2b2ljZV9zb3VyY2UiOiJwcmVtYWRlIiwiZmlsZW5hbWUiOiJlNjIwNmQxYS0wNzIxLTQ3ODctYWFmYi0wNmE2ZTcwNWNhYzUubXAzIiwidGltZXN0YW1wIjoxNzkwNTkzMjAwMDAwMDAwfQ%3D%3D",
-  },
-  {
-    id: "N2lVS1w4EtoT3dr4eOWO",
-    name: "Callum - Husky Trickster",
-    displayName: "Callum",
-    provider: "elevenlabs",
-    gender: "male",
-    accent: "American",
-    language: "en",
-    description: "Husky Trickster",
-    previewUrl:
-      "https://storage.googleapis.com/eleven-public-prod/premade/voices/N2lVS1w4EtoT3dr4eOWO/ac833bd8-ffda-4938-9ebc-b0f99ca25481.mp3",
-  },
-  {
-    id: "SAz9YHcvj6GT2YYXdXww",
-    name: "River - Relaxed, Neutral, Informative",
-    displayName: "River",
-    provider: "elevenlabs",
-    gender: "neutral",
-    accent: "American",
-    language: "en",
-    description: "Relaxed, Neutral, Informative",
-    previewUrl:
-      "https://storage.googleapis.com/eleven-public-prod/premade/voices/SAz9YHcvj6GT2YYXdXww/e6c95f0b-2227-491a-b3d7-2249240decb7.mp3",
-  },
-  {
-    id: "SOYHLrjzK2X1ezoPC6cr",
-    name: "Harry - Fierce Warrior",
-    displayName: "Harry",
-    provider: "elevenlabs",
-    gender: "male",
-    accent: "American",
-    language: "en",
-    description: "Fierce Warrior",
-    previewUrl:
-      "https://storage.googleapis.com/eleven-public-prod/premade/voices/SOYHLrjzK2X1ezoPC6cr/86d178f6-f4b6-4e0e-85be-3de19f490794.mp3",
-  },
-  {
-    id: "TX3LPaxmHKxFdv7VOQHJ",
-    name: "Liam - Energetic, Social Media Creator",
-    displayName: "Liam",
-    provider: "elevenlabs",
-    gender: "male",
-    accent: "American",
-    language: "en",
-    description: "Energetic, Social Media Creator",
-    previewUrl:
-      "https://storage.googleapis.com/eleven-public-prod/premade/voices/TX3LPaxmHKxFdv7VOQHJ/63148076-6363-42db-aea8-31424308b92c.mp3",
-  },
-  {
-    id: "Xb7hH8MSUJpSbSDYk0k2",
-    name: "Alice - Clear, Engaging Educator",
-    displayName: "Alice",
-    provider: "elevenlabs",
-    gender: "female",
-    accent: "British",
-    language: "en",
-    description: "Clear, Engaging Educator",
-    previewUrl:
-      "https://storage.googleapis.com/eleven-public-prod/premade/voices/Xb7hH8MSUJpSbSDYk0k2/d10f7534-11f6-41fe-a012-2de1e482d336.mp3",
-  },
-  {
-    id: "XrExE9yKIg1WjnnlVkGX",
-    name: "Matilda - Knowledgable, Professional",
-    displayName: "Matilda",
-    provider: "elevenlabs",
-    gender: "female",
-    accent: "American",
-    language: "en",
-    description: "Knowledgable, Professional",
-    previewUrl:
-      "https://storage.googleapis.com/eleven-public-prod/premade/voices/XrExE9yKIg1WjnnlVkGX/b930e18d-6b4d-466e-bab2-0ae97c6d8535.mp3",
-  },
-  {
-    id: "bIHbv24MWmeRgasZH58o",
-    name: "Will - Relaxed Optimist",
-    displayName: "Will",
-    provider: "elevenlabs",
-    gender: "male",
-    accent: "American",
-    language: "en",
-    description: "Relaxed Optimist",
-    previewUrl:
-      "https://storage.googleapis.com/eleven-public-prod/premade/voices/bIHbv24MWmeRgasZH58o/8caf8f3d-ad29-4980-af41-53f20c72d7a4.mp3",
-  },
-  {
-    id: "cgSgspJ2msm6clMCkdW9",
-    name: "Jessica - Playful, Bright, Warm",
-    displayName: "Jessica",
-    provider: "elevenlabs",
-    gender: "female",
-    accent: "American",
-    language: "en",
-    description: "Playful, Bright, Warm",
-    previewUrl:
-      "https://storage.googleapis.com/eleven-public-prod/premade/voices/cgSgspJ2msm6clMCkdW9/56a97bf8-b69b-448f-846c-c3a11683d45a.mp3",
-  },
-  {
-    id: "cjVigY5qzO86Huf0OWal",
-    name: "Eric - Smooth, Trustworthy",
-    displayName: "Eric",
-    provider: "elevenlabs",
-    gender: "male",
-    accent: "American",
-    language: "en",
-    description: "Smooth, Trustworthy",
-    previewUrl:
-      "https://storage.googleapis.com/eleven-public-prod/premade/voices/cjVigY5qzO86Huf0OWal/d098fda0-6456-4030-b3d8-63aa048c9070.mp3",
-  },
-  {
-    id: "hpp4J3VqNfWAUOO0d1Us",
-    name: "Bella - Professional, Bright, Warm",
-    displayName: "Bella",
-    provider: "elevenlabs",
-    gender: "female",
-    accent: "American",
-    language: "en",
-    description: "Professional, Bright, Warm",
-    previewUrl:
-      "https://storage.googleapis.com/eleven-public-prod/premade/voices/hpp4J3VqNfWAUOO0d1Us/dab0f5ba-3aa4-48a8-9fad-f138fea1126d.mp3",
-  },
-  {
-    id: "iP95p4xoKVk53GoZ742B",
-    name: "Chris - Charming, Down-to-Earth",
-    displayName: "Chris",
-    provider: "elevenlabs",
-    gender: "male",
-    accent: "American",
-    language: "en",
-    description: "Charming, Down-to-Earth",
-    previewUrl:
-      "https://storage.googleapis.com/eleven-public-prod/premade/voices/iP95p4xoKVk53GoZ742B/3f4bde72-cc48-40dd-829f-57fbf906f4d7.mp3",
-  },
-  {
-    id: "nPczCjzI2devNBz1zQrb",
-    name: "Brian - Deep, Resonant and Comforting",
-    displayName: "Brian",
-    provider: "elevenlabs",
-    gender: "male",
-    accent: "American",
-    language: "en",
-    description: "Deep, Resonant and Comforting",
-    previewUrl:
-      "https://api.us.elevenlabs.io/v1/voices/nPczCjzI2devNBz1zQrb/previews/audio?payload=eyJ2b2ljZV9zb3VyY2UiOiJwcmVtYWRlIiwiZmlsZW5hbWUiOiIyZGQzZTcyYy00ZmQzLTQyZjEtOTNlYS1hYmM1ZDRlNWFhMWQubXAzIiwidGltZXN0YW1wIjoxNzkwNTkzMjAwMDAwMDAwfQ%3D%3D",
-  },
-  {
-    id: "onwK4e9ZLuTAKqWW03F9",
-    name: "Daniel - Steady Broadcaster",
-    displayName: "Daniel",
-    provider: "elevenlabs",
-    gender: "male",
-    accent: "British",
-    language: "en",
-    description: "Steady Broadcaster",
-    previewUrl:
-      "https://api.us.elevenlabs.io/v1/voices/onwK4e9ZLuTAKqWW03F9/previews/audio?payload=eyJ2b2ljZV9zb3VyY2UiOiI3ZWVlMDIzNi0xYTcyLTRiODYtYjMwMy01ZGNhZGMwMDdiYTkubXAzIiwidGltZXN0YW1wIjoxNzkwNTkzMjAwMDAwMDAwfQ%3D%3D",
-  },
-  {
-    id: "pFZP5JQG7iQjIQuC4Bku",
-    name: "Lily - Velvety Actress",
-    displayName: "Lily",
-    provider: "elevenlabs",
-    gender: "female",
-    accent: "British",
-    language: "en",
-    description: "Velvety Actress",
-    previewUrl:
-      "https://storage.googleapis.com/eleven-public-prod/premade/voices/pFZP5JQG7iQjIQuC4Bku/89b68b35-b3dd-4348-a84a-a3c13a3c2b30.mp3",
-  },
-  {
-    id: "pNInz6obpgDQGcFmaJgB",
-    name: "Adam - Dominant, Firm",
-    displayName: "Adam",
-    provider: "elevenlabs",
-    gender: "male",
-    accent: "American",
-    language: "en",
-    description: "Dominant, Firm",
-    previewUrl:
-      "https://storage.googleapis.com/eleven-public-prod/premade/voices/pNInz6obpgDQGcFmaJgB/d6905d7a-dd26-4187-bfff-1bd3a5ea7cac.mp3",
-  },
-  {
-    id: "pqHfZKP75CvOlQylNhV4",
-    name: "Bill - Wise, Mature, Balanced",
-    displayName: "Bill",
-    provider: "elevenlabs",
-    gender: "male",
-    accent: "American",
-    language: "en",
-    description: "Wise, Mature, Balanced",
-    previewUrl:
-      "https://storage.googleapis.com/eleven-public-prod/premade/voices/pqHfZKP75CvOlQylNhV4/d782b3ff-84ba-4029-848c-acf01285524d.mp3",
-  },
-];
-
 export function normalizeE164Phone(phone: string): string {
   let cleaned = phone.replace(/[\s\(\)\-\.]/g, "");
   if (!cleaned.startsWith("+")) {
@@ -658,23 +401,19 @@ export class TelenowClient {
     return orgId;
   }
 
-  /** Fetches available voices from Telenow, falling back to curated voices if unreachable. */
+  /** Fetches available voices for the specified provider from Telenow. */
   async listVoices(provider = "elevenlabs"): Promise<TelenowVoiceOption[]> {
-    try {
-      const json = await this.request("GET", `/api/providers/tts/${provider}/voices`);
-      const obj = asObj(json);
-      const list = Array.isArray(obj?.["data"])
-        ? (obj["data"] as Array<Record<string, unknown>>)
-        : Array.isArray(json)
-          ? (json as Array<Record<string, unknown>>)
-          : [];
-      if (list.length > 0) {
-        return list.map((item) => parseVoice(item, provider));
-      }
-    } catch (err) {
-      console.warn(`[telenow] listVoices(${provider}) failed, using fallback catalog:`, err);
+    const json = await this.request("GET", `/api/providers/tts/${encodeURIComponent(provider)}/voices`);
+    const obj = asObj(json);
+    const list = Array.isArray(obj?.["data"])
+      ? (obj["data"] as Array<Record<string, unknown>>)
+      : Array.isArray(json)
+        ? (json as Array<Record<string, unknown>>)
+        : [];
+    if (list.length > 0) {
+      return list.map((item) => parseVoice(item, provider));
     }
-    return FALLBACK_VOICES;
+    return [];
   }
 
   /** Creates an agent inside this organization's Telenow workspace. */
@@ -684,10 +423,19 @@ export class TelenowClient {
     maxDurationSec: number;
     qaCriteria: TelenowQaCriterion[];
     courseId: string;
-    ttsVoice?: string;
-    ttsProvider?: string;
+    ttsVoice: string;
+    ttsProvider: string;
     opener?: string;
   }): Promise<string> {
+    const ttsVoice = input.ttsVoice?.trim();
+    const ttsProvider = input.ttsProvider?.trim();
+    if (!ttsVoice || !ttsProvider) {
+      throw new TelenowError(
+        "A TTS voice persona ID (ttsVoice) and provider (ttsProvider) are strictly required to create a voice agent.",
+        400,
+      );
+    }
+
     const json = await this.request(
       "POST",
       "/api/agents",
@@ -697,8 +445,8 @@ export class TelenowClient {
         llmProvider: VOICE_STACK.llmProvider,
         llmModel: VOICE_STACK.llmModel,
         sttProvider: VOICE_STACK.sttProvider,
-        ttsProvider: input.ttsProvider ?? VOICE_STACK.ttsProvider,
-        ttsVoice: input.ttsVoice ?? VOICE_STACK.ttsVoice,
+        ttsProvider,
+        ttsVoice,
         sessionConfig: { maxDuration: input.maxDurationSec },
         telephonyConfig: {
           opener: input.opener ?? "Hi there! I am your practice coach. Are you ready to begin?"
@@ -1382,35 +1130,20 @@ export async function validateTelenowApiKey(
 }
 
 /**
- * Fetches available voices for an organization, falling back to curated ElevenLabs voices.
+ * Fetches available voices for an organization directly from Telenow.
+ * Strictly requires an authenticated Telenow connection for the organization.
+ * Throws TelenowNotConfiguredError (428) if no Telenow API key is configured.
  */
 export async function getAvailableVoices(
   orgId?: string,
   provider = "elevenlabs",
 ): Promise<TelenowVoiceOption[]> {
-  if (orgId) {
-    try {
-      const { client } = await getTelenowClientForOrg(orgId);
-      return await client.listVoices(provider);
-    } catch {
-      // Organization not configured or error; fall through to public check
-    }
+  if (!orgId) {
+    throw new TelenowNotConfiguredError(
+      "Organisation context is required to fetch available voices.",
+    );
   }
 
-  // Try public provider endpoint
-  try {
-    const res = await fetch(`https://api.telenow.ai/api/providers/tts/${provider}/voices`, {
-      signal: AbortSignal.timeout(4000),
-    });
-    if (res.ok) {
-      const json = (await res.json()) as { data?: Array<Record<string, unknown>> };
-      if (Array.isArray(json?.data) && json.data.length > 0) {
-        return json.data.map((item) => parseVoice(item, provider));
-      }
-    }
-  } catch {
-    // fallback
-  }
-
-  return FALLBACK_VOICES;
+  const { client } = await getTelenowClientForOrg(orgId);
+  return await client.listVoices(provider);
 }

@@ -338,6 +338,13 @@ export async function provisionCourseOnTelenow(input: {
         ? (drill.scoringRubric as Array<Record<string, unknown>>)
         : [];
 
+    if (!drill.voice?.trim() || !drill.voiceProvider?.trim()) {
+      throw new TelenowError(
+        "A voice persona and TTS provider are required to provision this course. Please select a voice in the course editor.",
+        400,
+      );
+    }
+
     const agentId = await client.createAgent({
       name: drill.title,
       systemPrompt: buildCoachSystemPrompt(drill, docs),
@@ -347,8 +354,8 @@ export async function provisionCourseOnTelenow(input: {
         description: String(c["description"] ?? c["name"] ?? "").slice(0, 300),
       })),
       courseId: drill.id,
-      ttsVoice: drill.voice ?? undefined,
-      ttsProvider: drill.voiceProvider ?? undefined,
+      ttsVoice: drill.voice.trim(),
+      ttsProvider: drill.voiceProvider.trim(),
     });
 
     // 2b. Attach Knowledge Base to agent if configured

@@ -103,7 +103,7 @@ export const drills = pgTable("drills", {
   // Telenow integration (knowledge base, voice, and provisioned delivery)
   voice: varchar("voice", { length: 100 })
     .notNull()
-    .default("EXAVITQu4vr4xnSDxMaL"),
+    .default(""),
   voiceProvider: varchar("voice_provider", { length: 50 })
     .notNull()
     .default("elevenlabs"),

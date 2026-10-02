@@ -153,14 +153,19 @@ async function getOrCreateCheckinAgent(
   schedulerName: string,
   client: TelenowClient,
 ): Promise<string> {
-  if (schedule.telenowAgentId) return schedule.telenowAgentId;
+  if (!schedule.voice?.trim() || !schedule.voiceProvider?.trim()) {
+    throw new TelenowError(
+      "A voice persona and TTS provider are required for this daily check-in. Please select a voice in check-in settings.",
+      400,
+    );
+  }
 
   const agentId = await client.createAgent({
     name: `Check-in: ${schedule.title}`,
     systemPrompt: buildCheckinSystemPrompt(schedule, schedulerName),
     maxDurationSec: CHECKIN_CALL_SECONDS,
-    ttsVoice: schedule.voice ?? undefined,
-    ttsProvider: schedule.voiceProvider ?? undefined,
+    ttsVoice: schedule.voice.trim(),
+    ttsProvider: schedule.voiceProvider.trim(),
     opener: `Hi there! This is your daily voice check-in for ${schedulerName || "your manager"}. Do you have a couple minutes for a quick status update?`,
     qaCriteria: [
       { key: "report_given", description: "Did the report give a status update?" },

@@ -67,6 +67,7 @@ import {
   getTelenowClientForOrg,
   getAvailableVoices,
   TelenowClient,
+  TelenowNotConfiguredError,
 } from "../lib/telenow.js";
 import {
   uploadMediaFileToS3,
@@ -185,8 +186,8 @@ const createDrillSchema = z.object({
     .optional()
     .default(null),
   telenowKbId: z.string().trim().max(255).nullable().optional(),
-  voice: z.string().trim().max(100).optional().default("EXAVITQu4vr4xnSDxMaL"),
-  voiceProvider: z.string().trim().max(50).optional().default("elevenlabs"),
+  voice: z.string().trim().min(1, "A voice persona selection is required."),
+  voiceProvider: z.string().trim().min(1, "A voice provider is required."),
   phoneNumberId: z.string().trim().max(255).nullable().optional(),
   phoneNumber: z.string().trim().max(50).nullable().optional(),
   whatsappResources: z.array(whatsappResourceSchema).default([]),
@@ -333,7 +334,7 @@ function toPublicDrill(drill: DrillWithNames): PublicDrill {
     roleScope: drill.roleScope,
     expiresAt: drill.expiresAt,
     status: drill.status,
-    voice: drill.voice ?? "EXAVITQu4vr4xnSDxMaL",
+    voice: drill.voice ?? "",
     voiceProvider: drill.voiceProvider ?? "elevenlabs",
     telenowKbId: drill.telenowKbId,
     telenowAgentId: drill.telenowAgentId,
@@ -683,8 +684,8 @@ router.post(
 // GET /voices — list available AI coach voices
 // ---------------------------------------------------------------------------
 
-let cachedVoices: { voices: unknown[]; timestamp: number } | null = null;
-const VOICES_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+const cachedVoicesMap = new Map<string, { voices: unknown[]; timestamp: number }>();
+const VOICES_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
 router.get(
   "/voices",
@@ -697,23 +698,35 @@ router.get(
       return;
     }
 
+    const provider =
+      typeof req.query["provider"] === "string" && req.query["provider"].trim().length > 0
+        ? req.query["provider"].trim()
+        : "elevenlabs";
+
+    const cacheKey = `${user.orgId}:${provider}`;
     const now = Date.now();
-    if (cachedVoices && now - cachedVoices.timestamp < VOICES_CACHE_TTL_MS) {
-      res.status(200).json({ voices: cachedVoices.voices });
+    const cached = cachedVoicesMap.get(cacheKey);
+    if (cached && now - cached.timestamp < VOICES_CACHE_TTL_MS) {
+      res.status(200).json({ voices: cached.voices });
       return;
     }
 
     try {
-      const provider =
-        typeof req.query["provider"] === "string"
-          ? req.query["provider"]
-          : "elevenlabs";
       const voices = await getAvailableVoices(user.orgId, provider);
-      cachedVoices = { voices, timestamp: now };
+      cachedVoicesMap.set(cacheKey, { voices, timestamp: now });
       res.status(200).json({ voices });
     } catch (err) {
+      if (err instanceof TelenowNotConfiguredError || (err as { status?: number })?.status === 428) {
+        res.status(428).json({
+          code: "TELENOW_NOT_CONFIGURED",
+          message:
+            (err as Error).message ||
+            "Telenow Voice AI is not configured for your organisation. Please add an API key in Organisation Settings.",
+        });
+        return;
+      }
       console.error("[drills] GET /voices error:", err);
-      res.status(500).json({ message: "Failed to load voices." });
+      res.status(500).json({ message: (err as Error).message || "Failed to load voices from Telenow." });
     }
   },
 );
@@ -941,8 +954,8 @@ router.post(
           roleScope: data.roleScope,
           expiresAt: data.expiresAt ? new Date(data.expiresAt) : null,
           status: "draft",
-          voice: data.voice ?? "EXAVITQu4vr4xnSDxMaL",
-          voiceProvider: data.voiceProvider ?? "elevenlabs",
+          voice: data.voice,
+          voiceProvider: data.voiceProvider,
           phoneNumberId: data.phoneNumberId || null,
           phoneNumber: data.phoneNumber || null,
           telenowKbId: kbId,
@@ -1205,6 +1218,13 @@ router.post(
         return;
       }
 
+      if (!existing.voice || !existing.voice.trim()) {
+        res.status(400).json({
+          message: "An AI Coach voice persona must be selected before submitting this course for review.",
+        });
+        return;
+      }
+
       const [updated] = await db
         .update(drills)
         .set({ status: "pending_review" })
@@ -1279,6 +1299,13 @@ router.post(
       if (existing.status !== "pending_review") {
         res.status(409).json({
           message: "Only courses pending review can be approved.",
+        });
+        return;
+      }
+
+      if (!existing.voice || !existing.voice.trim()) {
+        res.status(400).json({
+          message: "An AI Coach voice persona must be selected before approving and publishing this course.",
         });
         return;
       }
