@@ -68,7 +68,7 @@ The execution lifecycle for a practice session follows a specific technical sequ
 
 ## The Voice Stack
 - **STT (Speech-to-Text):** Deepgram or Sarvam.
-- **LLM (Logic & Analysis):** GPT-4o-mini or Claude.
+- **LLM (Logic & Analysis):** GPT-5.4-mini, GPT-4o-mini or Claude.
 - **TTS (Text-to-Speech):** Sarvam or ElevenLabs.
 - **Transport:** Telephony integrated with WhatsApp.
 
