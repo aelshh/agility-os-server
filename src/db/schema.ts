@@ -13,3 +13,4 @@ export * from "./drills.js";
 export * from "./courseDocuments.js";
 export * from "./telenow.js";
 export * from "./dailyCheckins.js";
+export * from "./courseSchedules.js";

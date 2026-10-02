@@ -282,6 +282,25 @@ function buildCoachSystemPrompt(drill: DrillRow, docs: CourseDocumentRow[]): str
     );
   }
 
+  const rawResources = Array.isArray(drill.whatsappResources)
+    ? ((drill.whatsappResources as Array<Record<string, unknown>>).filter(
+        (r) => r && typeof r === "object" && r["enabled"] !== false,
+      ))
+    : [];
+
+  if (rawResources.length > 0) {
+    const resourceList = rawResources.map(
+      (r, i) =>
+        `${i + 1}. [${String(r["type"] ?? "RESOURCE").toUpperCase()}] "${String(r["title"] ?? "Resource")}": ${String(r["url"] ?? "Available on request")}${r["description"] ? ` (${String(r["description"])})` : ""}`,
+    );
+    parts.push(
+      "WhatsApp Learning Materials:\n" +
+        "You have the following training materials ready to be sent to the learner's WhatsApp:\n" +
+        resourceList.join("\n") +
+        "\nIf the learner asks for documentation, videos, or extra guides, reassure them that this material is sent directly to their WhatsApp.",
+    );
+  }
+
   parts.push(
     "Keep the conversation natural and spoken. At the end, let the learner ask for a recap of anything they are unsure about.",
   );

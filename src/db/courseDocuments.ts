@@ -14,7 +14,9 @@ export const courseDocuments = pgTable("course_documents", {
     .notNull()
     .references(() => drills.id, { onDelete: "cascade" }),
   originalName: varchar("original_name", { length: 255 }).notNull(),
-  storedName: varchar("stored_name", { length: 255 }).notNull(),
+  storedName: varchar("stored_name", { length: 255 }).notNull().default(""),
+  s3Key: varchar("s3_key", { length: 500 }),
+  storageUrl: text("storage_url"),
   mimeType: varchar("mime_type", { length: 100 })
     .notNull()
     .default("application/octet-stream"),

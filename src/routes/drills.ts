@@ -50,6 +50,7 @@ import {
 import type {
   CourseDocumentRow,
   CourseEnrollmentRow,
+  CourseWhatsappResource,
   DrillRow,
 } from "../db/schema.js";
 import {
@@ -67,6 +68,16 @@ import {
   getAvailableVoices,
   TelenowClient,
 } from "../lib/telenow.js";
+import {
+  uploadMediaFileToS3,
+  deleteMediaFileFromS3,
+  S3NotConfiguredError,
+  isS3Configured,
+} from "../lib/storage.js";
+import {
+  sendCourseWhatsappResource,
+  renderWhatsappResourceMessage,
+} from "../lib/whatsapp.js";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { requireRole } from "../middleware/requireRole.js";
 
@@ -95,7 +106,7 @@ const drillWriteLimiter = rateLimit({
   },
 });
 
-/** Knowledge-dump uploads are parsed in-memory, extracted to text, then written to disk. */
+/** Knowledge-dump uploads are parsed in-memory, extracted to text, then uploaded to S3. */
 const DOC_UPLOAD_LIMIT = 25 * 1024 * 1024;
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -114,6 +125,24 @@ const faqSchema = z
   .array(z.string().trim().min(1).max(1000))
   .max(100, "Too many practice questions.")
   .default([]);
+
+const whatsappResourceSchema = z.object({
+  id: z.string().trim().min(1),
+  title: z.string().trim().min(1, "Resource title is required").max(255),
+  type: z.enum(["video", "pdf", "link", "document", "text"]).default("link"),
+  url: z.string().trim().optional(),
+  documentId: z.string().trim().optional(),
+  s3Key: z.string().trim().optional(),
+  fileName: z.string().trim().optional(),
+  fileSize: z.number().int().nonnegative().optional(),
+  description: z.string().trim().max(1000).optional(),
+  caption: z.string().trim().max(2000).optional(),
+  deliveryTrigger: z
+    .enum(["during_call", "post_call", "on_enroll", "manual"])
+    .default("during_call"),
+  enabled: z.boolean().default(true),
+  createdAt: z.string().optional(),
+});
 
 const createDrillSchema = z.object({
   title: z.string().trim().min(1, "Title is required").max(255),
@@ -160,6 +189,7 @@ const createDrillSchema = z.object({
   voiceProvider: z.string().trim().max(50).optional().default("elevenlabs"),
   phoneNumberId: z.string().trim().max(255).nullable().optional(),
   phoneNumber: z.string().trim().max(50).nullable().optional(),
+  whatsappResources: z.array(whatsappResourceSchema).default([]),
   audienceIds: z
     .array(z.string().uuid("Invalid practitioner id."))
     .max(5000, "Too many practitioners.")
@@ -200,6 +230,7 @@ type PublicDrill = {
   phoneNumber: string | null;
   provisioningStatus: "none" | "provisioning" | "completed" | "failed";
   provisioningError: string | null;
+  whatsappResources: unknown;
   createdBy: string;
   createdByName: string | null;
   reviewedBy: string | null;
@@ -216,6 +247,8 @@ type PublicDocument = {
   originalName: string;
   mimeType: string;
   sizeBytes: number;
+  s3Key?: string | null;
+  storageUrl?: string | null;
   createdAt: Date;
 };
 
@@ -270,6 +303,7 @@ const drillBaseColumns = {
   phoneNumber: drills.phoneNumber,
   provisioningStatus: drills.provisioningStatus,
   provisioningError: drills.provisioningError,
+  whatsappResources: drills.whatsappResources,
   createdBy: drills.createdBy,
   reviewedBy: drills.reviewedBy,
   reviewComment: drills.reviewComment,
@@ -308,6 +342,7 @@ function toPublicDrill(drill: DrillWithNames): PublicDrill {
     phoneNumber: drill.phoneNumber ?? null,
     provisioningStatus: drill.provisioningStatus,
     provisioningError: drill.provisioningError,
+    whatsappResources: Array.isArray(drill.whatsappResources) ? drill.whatsappResources : [],
     createdBy: drill.createdBy,
     createdByName: drill.createdByName,
     reviewedBy: drill.reviewedBy,
@@ -320,12 +355,19 @@ function toPublicDrill(drill: DrillWithNames): PublicDrill {
   };
 }
 
-function toPublicDocument(doc: Pick<CourseDocumentRow, "id" | "originalName" | "mimeType" | "sizeBytes" | "createdAt">): PublicDocument {
+function toPublicDocument(
+  doc: Pick<CourseDocumentRow, "id" | "originalName" | "mimeType" | "sizeBytes" | "createdAt"> & {
+    s3Key?: string | null;
+    storageUrl?: string | null;
+  },
+): PublicDocument {
   return {
     id: doc.id,
     originalName: doc.originalName,
     mimeType: doc.mimeType,
     sizeBytes: doc.sizeBytes,
+    s3Key: doc.s3Key ?? null,
+    storageUrl: doc.storageUrl ?? null,
     createdAt: doc.createdAt,
   };
 }
@@ -341,6 +383,8 @@ async function loadDocumentsByCourse(
       originalName: courseDocuments.originalName,
       mimeType: courseDocuments.mimeType,
       sizeBytes: courseDocuments.sizeBytes,
+      s3Key: courseDocuments.s3Key,
+      storageUrl: courseDocuments.storageUrl,
       createdAt: courseDocuments.createdAt,
     })
     .from(courseDocuments)
@@ -2159,17 +2203,35 @@ router.post(
 
       const textContent = await extractText(file.originalname, file.mimetype, file.buffer);
 
-      const storedName = `${randomUUID()}${path.extname(file.originalname)}`;
-      const dir = path.join(UPLOADS_ROOT, user.orgId, drillId);
-      mkdirSync(dir, { recursive: true });
-      writeFileSync(path.join(dir, storedName), file.buffer);
+      // Upload strictly to AWS S3 / Cloudflare R2
+      let stored;
+      try {
+        stored = await uploadMediaFileToS3({
+          orgId: user.orgId,
+          courseId: drillId,
+          fileBuffer: file.buffer,
+          fileName: file.originalname,
+          mimeType: file.mimetype,
+        });
+      } catch (storageErr) {
+        if (storageErr instanceof S3NotConfiguredError) {
+          res.status(428).json({
+            message: storageErr.message,
+            error: "S3_NOT_CONFIGURED",
+          });
+          return;
+        }
+        throw storageErr;
+      }
 
       const [doc] = await db
         .insert(courseDocuments)
         .values({
           courseId: drillId,
           originalName: file.originalname.slice(0, 255),
-          storedName,
+          storedName: stored.key,
+          s3Key: stored.key,
+          storageUrl: stored.url,
           mimeType: file.mimetype.slice(0, 100) || "application/octet-stream",
           sizeBytes: file.size,
           textContent: textContent ?? null,
@@ -2178,7 +2240,7 @@ router.post(
         .returning();
 
       if (!doc) {
-        res.status(500).json({ message: "Failed to save the uploaded file." });
+        res.status(500).json({ message: "Failed to save the uploaded file record." });
         return;
       }
 
@@ -2186,7 +2248,7 @@ router.post(
     } catch (err) {
       if (handleDatabaseError(err, res)) return;
       console.error("[drills] document upload failed", err);
-      res.status(500).json({ message: "Failed to upload the file." });
+      res.status(500).json({ message: "Failed to upload the file to S3." });
     }
   },
 );
@@ -2238,13 +2300,9 @@ router.delete(
         return;
       }
 
-      const storedPath = path.join(
-        UPLOADS_ROOT,
-        user.orgId,
-        drillId,
-        row.doc.storedName,
-      );
-      rmSync(storedPath, { force: true });
+      if (row.doc.s3Key) {
+        await deleteMediaFileFromS3(row.doc.s3Key);
+      }
 
       await db.delete(courseDocuments).where(eq(courseDocuments.id, docId));
       res.status(204).end();
@@ -2252,6 +2310,114 @@ router.delete(
       if (handleDatabaseError(err, res)) return;
       console.error("[drills] document delete failed", err);
       res.status(500).json({ message: "Failed to remove the file." });
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
+// POST /:id/whatsapp-resources/preview — preview formatted WhatsApp text
+// ---------------------------------------------------------------------------
+
+router.post(
+  "/:id/whatsapp-resources/preview",
+  requireAuth,
+  requireRole(...CREATOR_ROLES),
+  async (req, res) => {
+    const resource = req.body["resource"];
+    const courseTitle = req.body["courseTitle"] || "Training Course";
+    const userName = req.body["userName"] || "Alex Smith";
+
+    if (!resource || typeof resource !== "object") {
+      res.status(400).json({ message: "Resource object is required." });
+      return;
+    }
+
+    const rendered = renderWhatsappResourceMessage({
+      courseTitle,
+      userName,
+      resource,
+    });
+
+    res.status(200).json({ message: rendered });
+  },
+);
+
+// ---------------------------------------------------------------------------
+// POST /:id/whatsapp-resources/send — manually dispatch a resource over WhatsApp
+// ---------------------------------------------------------------------------
+
+router.post(
+  "/:id/whatsapp-resources/send",
+  requireAuth,
+  requireRole(...CREATOR_ROLES),
+  drillWriteLimiter,
+  async (req, res) => {
+    const user = req.user;
+    if (!user || !user.orgId) {
+      res.status(401).json({ message: "Not authenticated." });
+      return;
+    }
+
+    const drillId = req.params["id"];
+    if (!drillId || typeof drillId !== "string") {
+      res.status(400).json({ message: "A valid course id is required." });
+      return;
+    }
+    const { resourceId, targetUserId, targetPhone } = req.body;
+
+    if (!resourceId) {
+      res.status(400).json({ message: "resourceId is required." });
+      return;
+    }
+
+    try {
+      const [drill] = await db
+        .select()
+        .from(drills)
+        .where(and(eq(drills.id, drillId), eq(drills.orgId, user.orgId)))
+        .limit(1);
+
+      if (!drill) {
+        res.status(404).json({ message: "Course not found." });
+        return;
+      }
+
+      const rawResources = Array.isArray(drill.whatsappResources)
+        ? (drill.whatsappResources as CourseWhatsappResource[])
+        : [];
+
+      const resource = rawResources.find((r) => r.id === resourceId);
+      if (!resource) {
+        res.status(404).json({ message: "WhatsApp resource not found in course." });
+        return;
+      }
+
+      let recipientUser = user;
+      if (targetUserId) {
+        const [foundUser] = await db
+          .select()
+          .from(users)
+          .where(and(eq(users.id, targetUserId), eq(users.orgId, user.orgId)))
+          .limit(1);
+        if (foundUser) recipientUser = foundUser;
+      }
+
+      const sendResult = await sendCourseWhatsappResource({
+        drill,
+        user: recipientUser,
+        resource,
+        customPhone: targetPhone,
+      });
+
+      if (!sendResult.ok) {
+        res.status(400).json({ message: sendResult.error || "Failed to send WhatsApp resource." });
+        return;
+      }
+
+      res.status(200).json({ success: true, wamid: sendResult.wamid });
+    } catch (err) {
+      console.error("[drills] POST /:id/whatsapp-resources/send error:", err);
+      res.status(500).json({ message: "Failed to dispatch WhatsApp resource." });
     }
   },
 );

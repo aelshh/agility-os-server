@@ -39,6 +39,7 @@ import {
   computeTalkRatioFromTranscript,
   evaluateCourseCallTranscript,
 } from "../lib/ai/evaluate.js";
+import { sendPostCallResources } from "../lib/whatsapp.js";
 
 const router = Router();
 
@@ -286,7 +287,7 @@ async function resolveInternalOrgId(
 async function findEnrollment(
   payload: Record<string, unknown>,
   orgId?: string | null,
-): Promise<{ id: string; status: string } | null> {
+): Promise<{ id: string; status: string; courseId: string; userId: string } | null> {
   const resolvedOrgId =
     (await resolveInternalOrgId(orgId)) ??
     (await resolveInternalOrgId(asString(payload["orgId"])));
@@ -305,7 +306,12 @@ async function findEnrollment(
   if (conditions.length > 0) {
     if (resolvedOrgId) {
       const [row] = await db
-        .select({ id: courseEnrollments.id, status: courseEnrollments.status })
+        .select({
+          id: courseEnrollments.id,
+          status: courseEnrollments.status,
+          courseId: courseEnrollments.courseId,
+          userId: courseEnrollments.userId,
+        })
         .from(courseEnrollments)
         .where(and(or(...conditions)!, eq(courseEnrollments.orgId, resolvedOrgId)))
         .limit(1);
@@ -314,7 +320,12 @@ async function findEnrollment(
     }
 
     const [row] = await db
-      .select({ id: courseEnrollments.id, status: courseEnrollments.status })
+      .select({
+        id: courseEnrollments.id,
+        status: courseEnrollments.status,
+        courseId: courseEnrollments.courseId,
+        userId: courseEnrollments.userId,
+      })
       .from(courseEnrollments)
       .where(or(...conditions)!)
       .limit(1);
@@ -335,7 +346,12 @@ async function findEnrollment(
       }
 
       const [row] = await db
-        .select({ id: courseEnrollments.id, status: courseEnrollments.status })
+        .select({
+          id: courseEnrollments.id,
+          status: courseEnrollments.status,
+          courseId: courseEnrollments.courseId,
+          userId: courseEnrollments.userId,
+        })
         .from(courseEnrollments)
         .innerJoin(users, eq(courseEnrollments.userId, users.id))
         .where(and(...whereList))
@@ -541,13 +557,22 @@ async function handleCallEnded(
     }
   }
 
-  await db
+    await db
     .update(courseEnrollments)
     .set({
       ...patch,
       calledAt: occurredAt,
     })
     .where(eq(courseEnrollments.id, enrollment.id));
+
+  if (patch.status === "completed") {
+    void sendPostCallResources({
+      drillId: enrollment.courseId,
+      userId: enrollment.userId,
+    }).catch((err) => {
+      console.warn("[webhooks] post_call WhatsApp dispatch failed:", err);
+    });
+  }
 
   return true;
 }
@@ -614,6 +639,13 @@ async function handleCallAnalyzed(
     .update(courseEnrollments)
     .set(patch)
     .where(eq(courseEnrollments.id, enrollment.id));
+
+  void sendPostCallResources({
+    drillId: enrollment.courseId,
+    userId: enrollment.userId,
+  }).catch((err) => {
+    console.warn("[webhooks] post_call WhatsApp dispatch failed:", err);
+  });
 
   return true;
 }

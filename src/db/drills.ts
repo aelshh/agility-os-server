@@ -117,6 +117,9 @@ export const drills = pgTable("drills", {
     .default("none"),
   provisioningError: text("provisioning_error"),
 
+  // WhatsApp deliverable resources (video links, PDFs, documents, cheat sheets)
+  whatsappResources: jsonb("whatsapp_resources").notNull().default([]),
+
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
@@ -125,6 +128,22 @@ export const drills = pgTable("drills", {
     .defaultNow()
     .$onUpdate(() => new Date()),
 });
+
+export type CourseWhatsappResource = {
+  id: string;
+  title: string;
+  type: "video" | "pdf" | "link" | "document" | "text";
+  url?: string;
+  documentId?: string;
+  s3Key?: string;
+  fileName?: string;
+  fileSize?: number;
+  description?: string;
+  caption?: string;
+  deliveryTrigger: "during_call" | "post_call" | "on_enroll" | "manual";
+  enabled: boolean;
+  createdAt?: string;
+};
 
 export type DrillRow = typeof drills.$inferSelect;
 export type NewDrill = typeof drills.$inferInsert;
