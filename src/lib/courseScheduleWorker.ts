@@ -115,7 +115,7 @@ export async function sendSchedulePriorNotification(
   const errors: string[] = [];
 
   try {
-    const { client } = await getTelenowClientForOrg(org.id);
+    const { client, telenowOrgId } = await getTelenowClientForOrg(org.id);
 
     for (const user of targetUsers) {
       const rawPhone = user.phone?.trim();
@@ -139,19 +139,55 @@ export async function sendSchedulePriorNotification(
         ? `\n💬 _${schedule.customMessage.trim()}_\n`
         : "";
 
+      const timeWindow = `${schedule.timeWindowStart} – ${schedule.timeWindowEnd} (${schedule.timezone})`;
+      const note =
+        schedule.customMessage?.trim() ||
+        "Please be available to receive your coaching practice call or dial in directly.";
+
       const message =
         `*Agility OS Training Reminder* 🔔\n\n` +
         `Hi *${userName}*, your practice session for *${course.title}* is scheduled for today!\n\n` +
-        `⏰ *Active Window:* ${schedule.timeWindowStart} – ${schedule.timeWindowEnd} (${schedule.timezone})\n` +
+        `⏰ *Active Window:* ${timeWindow}\n` +
         `${customMsg}` +
         `\nPlease be available to receive your coaching practice call or dial in directly. Good luck!\n\n` +
         `_Agility OS AI Coaching_`;
 
       try {
-        const res = await client.sendWhatsAppMessage({
-          to: phone,
-          message,
-        });
+        const channelId =
+          schedule.whatsappChannelId ||
+          course.whatsappChannelId ||
+          org.defaultWhatsappChannelId ||
+          undefined;
+
+        let wamid: string | null = null;
+
+        // 1. Prefer approved Meta template: course_schedule_reminder
+        try {
+          const res = await client.sendWhatsAppTemplate(
+            {
+              channelId,
+              to: phone,
+              template: "course_schedule_reminder",
+              language: "en_US",
+              variables: [userName, course.title, timeWindow, note],
+            },
+            telenowOrgId,
+          );
+          wamid = res.wamid ?? null;
+        } catch (templateErr) {
+          console.warn(
+            `[schedule-worker] course_schedule_reminder template failed for ${phone}, attempting text fallback:`,
+            templateErr,
+          );
+
+          // 2. Fallback to free-form text if template is rejected or session-based channel
+          const res = await client.sendWhatsAppMessage({
+            to: phone,
+            message,
+            channelId,
+          });
+          wamid = res.wamid ?? null;
+        }
 
         await db.insert(courseScheduleNotifications).values({
           orgId: org.id,
@@ -160,7 +196,7 @@ export async function sendSchedulePriorNotification(
           userId: user.id,
           phone,
           status: "sent",
-          wamid: res.wamid ?? null,
+          wamid,
           sentAt: new Date(),
         });
         sentCount++;

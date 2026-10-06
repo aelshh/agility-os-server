@@ -39,7 +39,7 @@ import {
   computeTalkRatioFromTranscript,
   evaluateCourseCallTranscript,
 } from "../lib/ai/evaluate.js";
-import { sendPostCallResources } from "../lib/whatsapp.js";
+import { sendPostCallResources, sendPostCallFeedback } from "../lib/whatsapp.js";
 
 const router = Router();
 
@@ -566,6 +566,18 @@ async function handleCallEnded(
     .where(eq(courseEnrollments.id, enrollment.id));
 
   if (patch.status === "completed") {
+    if (patch.score !== undefined && patch.score !== null) {
+      void sendPostCallFeedback({
+        drillId: enrollment.courseId,
+        userId: enrollment.userId,
+        score: patch.score,
+        talkRatio: patch.talkRatio,
+        coachingTips: patch.coachingTips,
+      }).catch((err) => {
+        console.warn("[webhooks] practice_call_feedback WhatsApp dispatch failed:", err);
+      });
+    }
+
     void sendPostCallResources({
       drillId: enrollment.courseId,
       userId: enrollment.userId,
@@ -639,6 +651,18 @@ async function handleCallAnalyzed(
     .update(courseEnrollments)
     .set(patch)
     .where(eq(courseEnrollments.id, enrollment.id));
+
+  if (patch.score !== undefined && patch.score !== null) {
+    void sendPostCallFeedback({
+      drillId: enrollment.courseId,
+      userId: enrollment.userId,
+      score: patch.score,
+      talkRatio: patch.talkRatio,
+      coachingTips: patch.coachingTips,
+    }).catch((err) => {
+      console.warn("[webhooks] practice_call_feedback WhatsApp dispatch failed:", err);
+    });
+  }
 
   void sendPostCallResources({
     drillId: enrollment.courseId,
