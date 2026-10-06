@@ -33,10 +33,7 @@ function truncate(text: string, max: number): string {
 }
 
 /** Free-text knowledge + uploaded document texts, bounded for tokens. */
-function buildReference(
-  course: CourseLike,
-  docs: DocLike[],
-): string {
+function buildReference(course: CourseLike, docs: DocLike[]): string {
   const parts: string[] = [];
 
   if (course.knowledgeText.trim()) {
@@ -52,13 +49,17 @@ function buildReference(
   return truncate(parts.join("\n\n---\n\n"), MAX_REFERENCE_CHARS);
 }
 
-export function extractJsonObject(content: string | null | undefined): Record<string, unknown> | null {
+export function extractJsonObject(
+  content: string | null | undefined,
+): Record<string, unknown> | null {
   if (!content) return null;
   const start = content.indexOf("{");
   if (start < 0) return null;
   try {
     const parsed = JSON.parse(content.slice(start));
-    return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
+    return parsed && typeof parsed === "object"
+      ? (parsed as Record<string, unknown>)
+      : null;
   } catch {
     const match = content.match(/\{[\s\S]*\}/);
     if (!match) return null;
@@ -102,6 +103,7 @@ export async function generateCoachPersona(input: {
   const completion = await client.chat.completions.create({
     model: AI_MODEL,
     response_format: { type: "json_object" },
+    max_tokens: 1500,
     messages: [
       {
         role: "system",
@@ -132,8 +134,10 @@ export async function generateCoachPersona(input: {
   });
 
   const parsed = extractJsonObject(completion.choices[0]?.message?.content);
-  const name = typeof parsed?.["name"] === "string" ? parsed["name"].trim() : "";
-  const prompt = typeof parsed?.["prompt"] === "string" ? parsed["prompt"].trim() : "";
+  const name =
+    typeof parsed?.["name"] === "string" ? parsed["name"].trim() : "";
+  const prompt =
+    typeof parsed?.["prompt"] === "string" ? parsed["prompt"].trim() : "";
 
   if (!name || !prompt) return null;
   return {
@@ -168,6 +172,7 @@ export async function generateFaqSuggestions(input: {
   const completion = await client.chat.completions.create({
     model: AI_MODEL,
     response_format: { type: "json_object" },
+    max_tokens: 1000,
     messages: [
       {
         role: "system",
@@ -247,6 +252,7 @@ export async function generateCheckinSummary(
   const completion = await client.chat.completions.create({
     model: AI_MODEL,
     response_format: { type: "json_object" },
+    max_tokens: 1200,
     messages: [
       {
         role: "system",
@@ -266,9 +272,9 @@ export async function generateCheckinSummary(
           "  ]\n" +
           "}\n\n" +
           "Guidelines:\n" +
-          "- If a topic wasn't mentioned, return an empty string \"\" or empty array [].\n" +
-          "- If the caller reported illness, inability to work, or being blocked, set sentiment to \"needs_attention\" or \"blocked\" and clearly state in blockers.\n" +
-          "- For \"answers\", summarize the direct answer to each question asked during the call.\n" +
+          '- If a topic wasn\'t mentioned, return an empty string "" or empty array [].\n' +
+          '- If the caller reported illness, inability to work, or being blocked, set sentiment to "needs_attention" or "blocked" and clearly state in blockers.\n' +
+          '- For "answers", summarize the direct answer to each question asked during the call.\n' +
           "- Write in professional, clear English. Never invent facts not in the transcript.",
       },
       {
@@ -314,7 +320,14 @@ export async function generateCheckinSummary(
     }
   }
 
-  if (!report && !priorities && !blockers && !suggestions && !updates && answers.length === 0) {
+  if (
+    !report &&
+    !priorities &&
+    !blockers &&
+    !suggestions &&
+    !updates &&
+    answers.length === 0
+  ) {
     return null;
   }
 
@@ -358,7 +371,10 @@ function normalizeRubricWeights(list: RubricCriterionSuggestion[]): void {
     if (i === list.length - 1) {
       item.weight = Math.max(1, 100 - runningSum);
     } else {
-      const scaled = Math.max(1, Math.round((item.weight / currentTotal) * 100));
+      const scaled = Math.max(
+        1,
+        Math.round((item.weight / currentTotal) * 100),
+      );
       item.weight = scaled;
       runningSum += scaled;
     }
@@ -390,6 +406,7 @@ export async function generateRubricSuggestions(input: {
   const completion = await client.chat.completions.create({
     model: AI_MODEL,
     response_format: { type: "json_object" },
+    max_tokens: 1200,
     messages: [
       {
         role: "system",

@@ -266,6 +266,7 @@ export async function evaluateCourseCallTranscript(input: {
     const completion = await client.chat.completions.create({
       model: AI_MODEL,
       response_format: { type: "json_object" },
+      max_tokens: 1800,
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },
