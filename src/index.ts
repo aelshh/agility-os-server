@@ -21,6 +21,7 @@ import { courseSchedulesRouter } from "./routes/courseSchedules.js";
 import { startDailyCheckinScheduler } from "./lib/checkinScheduler.js";
 import { startCourseScheduleWorker } from "./lib/courseScheduleWorker.js";
 import { backfillUnevaluatedCalls } from "./lib/backfillAnalytics.js";
+import { ensureSchemaColumns } from "./db/autoMigrate.js";
 
 const app = express();
 const PORT = Number(process.env["PORT"]) || 3000;
@@ -87,6 +88,9 @@ app.listen(PORT, () => {
     }
   });
 });
+
+// Ensure schema migrations on boot
+void ensureSchemaColumns();
 
 // Recurring background jobs.
 startDailyCheckinScheduler();

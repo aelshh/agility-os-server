@@ -61,6 +61,7 @@ const createScheduleSchema = z.object({
     .regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Time window end must be in HH:mm format.")
     .default("14:00"),
   timezone: z.string().trim().max(50).optional(),
+  whatsappChannelId: z.string().trim().max(255).optional().nullable(),
   notifyWhatsappPrior: z.boolean().default(true),
   notifyMinutesBefore: z.number().int().min(0).max(1440).default(30),
   customMessage: z.string().trim().max(1000).optional().nullable(),
@@ -556,6 +557,7 @@ courseSchedulesRouter.post(
           timeWindowStart: data.timeWindowStart,
           timeWindowEnd: data.timeWindowEnd,
           timezone,
+          whatsappChannelId: data.whatsappChannelId ?? null,
           notifyWhatsappPrior: data.notifyWhatsappPrior,
           notifyMinutesBefore: data.notifyMinutesBefore,
           customMessage: data.customMessage ?? null,
@@ -649,6 +651,9 @@ courseSchedulesRouter.put(
           ...(data.timeWindowStart !== undefined ? { timeWindowStart: data.timeWindowStart } : {}),
           ...(data.timeWindowEnd !== undefined ? { timeWindowEnd: data.timeWindowEnd } : {}),
           ...(data.timezone !== undefined ? { timezone: data.timezone } : {}),
+          ...(data.whatsappChannelId !== undefined
+            ? { whatsappChannelId: data.whatsappChannelId }
+            : {}),
           ...(data.notifyWhatsappPrior !== undefined
             ? { notifyWhatsappPrior: data.notifyWhatsappPrior }
             : {}),

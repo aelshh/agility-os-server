@@ -190,6 +190,7 @@ const createDrillSchema = z.object({
   voiceProvider: z.string().trim().min(1, "A voice provider is required."),
   phoneNumberId: z.string().trim().max(255).nullable().optional(),
   phoneNumber: z.string().trim().max(50).nullable().optional(),
+  whatsappChannelId: z.string().trim().max(255).nullable().optional(),
   whatsappResources: z.array(whatsappResourceSchema).default([]),
   audienceIds: z
     .array(z.string().uuid("Invalid practitioner id."))
@@ -229,6 +230,7 @@ type PublicDrill = {
   telenowCampaignId: string | null;
   phoneNumberId: string | null;
   phoneNumber: string | null;
+  whatsappChannelId: string | null;
   provisioningStatus: "none" | "provisioning" | "completed" | "failed";
   provisioningError: string | null;
   whatsappResources: unknown;
@@ -302,6 +304,7 @@ const drillBaseColumns = {
   telenowCampaignId: drills.telenowCampaignId,
   phoneNumberId: drills.phoneNumberId,
   phoneNumber: drills.phoneNumber,
+  whatsappChannelId: drills.whatsappChannelId,
   provisioningStatus: drills.provisioningStatus,
   provisioningError: drills.provisioningError,
   whatsappResources: drills.whatsappResources,
@@ -341,6 +344,7 @@ function toPublicDrill(drill: DrillWithNames): PublicDrill {
     telenowCampaignId: drill.telenowCampaignId,
     phoneNumberId: drill.phoneNumberId ?? null,
     phoneNumber: drill.phoneNumber ?? null,
+    whatsappChannelId: drill.whatsappChannelId ?? null,
     provisioningStatus: drill.provisioningStatus,
     provisioningError: drill.provisioningError,
     whatsappResources: Array.isArray(drill.whatsappResources) ? drill.whatsappResources : [],

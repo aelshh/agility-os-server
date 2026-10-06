@@ -105,6 +105,85 @@ function unwrapEnvelope(value: unknown): unknown {
   return value;
 }
 
+/**
+ * Extracts and normalizes a phone number from various Telenow WhatsApp object shapes
+ * (e.g. jid, me.id, user.id, display_phone_number, settings.phone, etc.).
+ */
+function extractWhatsAppPhoneNumber(raw: unknown): string {
+  if (!raw || typeof raw !== "object") return "";
+  const item = raw as Record<string, unknown>;
+
+  const candidateFields: unknown[] = [
+    readKey(item, "phone"),
+    readKey(item, "phoneNumber"),
+    readKey(item, "phone_number"),
+    readKey(item, "e164"),
+    readKey(item, "number"),
+    readKey(item, "display_phone_number"),
+    readKey(item, "displayPhoneNumber"),
+    readKey(item, "wa_id"),
+    readKey(item, "waId"),
+    readKey(item, "jid"),
+    readKey(item, "user_id"),
+    readKey(item, "id"),
+  ];
+
+  const nestedCandidates: (Record<string, unknown> | null | undefined)[] = [
+    asObj(readKey(item, "me")),
+    asObj(readKey(item, "user")),
+    asObj(readKey(item, "account")),
+    asObj(readKey(item, "metadata")),
+    asObj(readKey(item, "settings")),
+    asObj(readKey(item, "session")),
+    asObj(readKey(item, "device")),
+  ];
+
+  for (const nested of nestedCandidates) {
+    if (nested) {
+      candidateFields.push(
+        readKey(nested, "phone"),
+        readKey(nested, "phoneNumber"),
+        readKey(nested, "phone_number"),
+        readKey(nested, "e164"),
+        readKey(nested, "number"),
+        readKey(nested, "id"),
+        readKey(nested, "jid"),
+        readKey(nested, "display_phone_number"),
+        readKey(nested, "displayPhoneNumber"),
+        readKey(nested, "wa_id"),
+        readKey(nested, "waId"),
+      );
+    }
+  }
+
+  for (const cand of candidateFields) {
+    if (!cand) continue;
+    const str = String(cand).trim();
+    if (!str) continue;
+
+    // Isolate the user part if JID format (e.g. 919876543210:0@s.whatsapp.net or 15550199@c.us)
+    let candidateDigits = str;
+    if (candidateDigits.includes("@")) {
+      candidateDigits = candidateDigits.split("@")[0] || "";
+    }
+    if (candidateDigits.includes(":")) {
+      candidateDigits = candidateDigits.split(":")[0] || "";
+    }
+
+    // Ignore pure UUIDs or strings with alpha characters in the user part
+    if (/[a-zA-Z]/.test(candidateDigits)) {
+      continue;
+    }
+
+    const digits = candidateDigits.replace(/[^\d]/g, "");
+    if (digits.length >= 7 && digits.length <= 16) {
+      return `+${digits}`;
+    }
+  }
+
+  return "";
+}
+
 // ---------------------------------------------------------------------------
 // TelenowClient
 // ---------------------------------------------------------------------------
@@ -907,11 +986,13 @@ export class TelenowClient {
   }
 
   // -------------------------------------------------------------------------
-  // WhatsApp Messaging & Channel Pairing (telenow.ai/docs/wa-overview)
+  // WhatsApp Messaging & Channel Management (telenow.ai/docs/wa-overview)
+  // Strictly using the official Org API Key surface: /api/orgs/{orgId}/whatsapp-hub/*
   // -------------------------------------------------------------------------
 
   /**
    * Initiates a new WhatsApp QR pairing session.
+   * Path: POST /api/orgs/{orgId}/whatsapp/sessions
    */
   async createWhatsAppSession(
     label?: string,
@@ -927,62 +1008,48 @@ export class TelenowClient {
       name: label?.trim() || "AgilityOS Channel",
     };
 
-    const candidateEndpoints = [
+    const json = await this.request(
+      "POST",
       `/api/orgs/${targetOrgId}/whatsapp/sessions`,
-      `/api/orgs/${targetOrgId}/whatsapp-cloud/sessions`,
-      `/api/app-whatsapp/sessions`,
-      `/api/whatsapp/sessions`,
-    ];
+      payload,
+      undefined,
+      { "X-Org-Id": targetOrgId },
+    );
+    const data = asObj(unwrapEnvelope(json)) ?? asObj(json);
+    const target = asObj(readKey(data ?? {}, "session")) ?? data;
 
-    let lastErr: unknown = null;
-    for (const endpoint of candidateEndpoints) {
-      try {
-        const json = await this.request(
-          "POST",
-          endpoint,
-          payload,
-          undefined,
-          { "X-Org-Id": targetOrgId },
-        );
-        const data = asObj(unwrapEnvelope(json)) ?? asObj(json);
-        const target = asObj(readKey(data ?? {}, "session")) ?? data;
+    const sessionId =
+      asString(target, "id") ||
+      asString(target, "sessionId") ||
+      asString(target, "session_id") ||
+      asString(target, "sid") ||
+      asString(data, "id") ||
+      asString(data, "sessionId") ||
+      asString(data, "sid");
 
-        const sessionId =
-          asString(target, "id") ||
-          asString(target, "sessionId") ||
-          asString(target, "session_id") ||
-          asString(target, "sid") ||
-          asString(data, "id") ||
-          asString(data, "sessionId") ||
-          asString(data, "sid");
-
-        if (sessionId) {
-          const qr =
-            asString(target, "qr") ||
-            asString(target, "qrCode") ||
-            asString(target, "qr_code") ||
-            asString(target, "qrcode") ||
-            asString(data, "qr") ||
-            asString(data, "qrCode") ||
-            null;
-          const status =
-            asString(target, "status") ||
-            asString(data, "status") ||
-            (qr ? "qr_ready" : "created");
-          return { sessionId, status, qr };
-        }
-      } catch (err) {
-        lastErr = err;
-      }
+    if (!sessionId) {
+      throw new TelenowError("Failed to initiate WhatsApp pairing session.");
     }
 
-    throw lastErr instanceof Error
-      ? lastErr
-      : new TelenowError("Failed to initiate WhatsApp pairing session.");
+    const qr =
+      asString(target, "qr") ||
+      asString(target, "qrCode") ||
+      asString(target, "qr_code") ||
+      asString(target, "qrcode") ||
+      asString(data, "qr") ||
+      asString(data, "qrCode") ||
+      null;
+    const status =
+      asString(target, "status") ||
+      asString(data, "status") ||
+      (qr ? "qr_ready" : "created");
+
+    return { sessionId, status, qr };
   }
 
   /**
    * Retrieves status and QR payload for an active pairing session.
+   * Path: GET /api/orgs/{orgId}/whatsapp/sessions/{sessionId}
    */
   async getWhatsAppSession(
     sessionId: string,
@@ -996,68 +1063,56 @@ export class TelenowClient {
   }> {
     const targetOrgId = orgId ?? (await this.resolveOrgId());
 
-    const candidateEndpoints = [
+    const json = await this.request(
+      "GET",
       `/api/orgs/${targetOrgId}/whatsapp/sessions/${sessionId}`,
-      `/api/orgs/${targetOrgId}/whatsapp-cloud/sessions/${sessionId}`,
-      `/api/app-whatsapp/sessions/${sessionId}`,
-      `/api/whatsapp/sessions/${sessionId}`,
-    ];
+      undefined,
+      undefined,
+      { "X-Org-Id": targetOrgId },
+    );
+    const data = asObj(unwrapEnvelope(json)) ?? asObj(json);
+    const target = asObj(readKey(data ?? {}, "session")) ?? data;
 
-    let lastErr: unknown = null;
-    for (const endpoint of candidateEndpoints) {
-      try {
-        const json = await this.request(
-          "GET",
-          endpoint,
-          undefined,
-          undefined,
-          { "X-Org-Id": targetOrgId },
-        );
-        const data = asObj(unwrapEnvelope(json)) ?? asObj(json);
-        const target = asObj(readKey(data ?? {}, "session")) ?? data;
-
-        if (target) {
-          const sid =
-            asString(target, "id") ||
-            asString(target, "sessionId") ||
-            asString(target, "session_id") ||
-            asString(target, "sid") ||
-            sessionId;
-          const qr =
-            asString(target, "qr") ||
-            asString(target, "qrCode") ||
-            asString(target, "qr_code") ||
-            asString(data, "qr") ||
-            null;
-          const status =
-            asString(target, "status") ||
-            asString(data, "status") ||
-            (qr ? "qr_ready" : "created");
-          const phone =
-            asString(target, "phone") ||
-            asString(target, "number") ||
-            asString(target, "e164") ||
-            asString(data, "phone") ||
-            null;
-          const channelId =
-            asString(target, "channelId") ||
-            asString(target, "channel_id") ||
-            asString(data, "channelId") ||
-            null;
-          return { sessionId: sid, status, qr, phone, channelId };
-        }
-      } catch (err) {
-        lastErr = err;
-      }
+    if (!target && !data) {
+      throw new TelenowError(`Failed to fetch WhatsApp session ${sessionId}.`);
     }
 
-    throw lastErr instanceof Error
-      ? lastErr
-      : new TelenowError(`Failed to fetch WhatsApp session ${sessionId}.`);
+    const sid =
+      asString(target, "id") ||
+      asString(target, "sessionId") ||
+      asString(target, "session_id") ||
+      asString(target, "sid") ||
+      sessionId;
+    const qr =
+      asString(target, "qr") ||
+      asString(target, "qrCode") ||
+      asString(target, "qr_code") ||
+      asString(data, "qr") ||
+      null;
+    const status =
+      asString(target, "status") ||
+      asString(data, "status") ||
+      (qr ? "qr_ready" : "created");
+    const phone =
+      extractWhatsAppPhoneNumber(target) ||
+      extractWhatsAppPhoneNumber(data) ||
+      asString(target, "phone") ||
+      asString(target, "number") ||
+      asString(target, "e164") ||
+      asString(data, "phone") ||
+      null;
+    const channelId =
+      asString(target, "channelId") ||
+      asString(target, "channel_id") ||
+      asString(data, "channelId") ||
+      null;
+
+    return { sessionId: sid, status, qr, phone, channelId };
   }
 
   /**
    * Deletes / cancels an active WhatsApp pairing session.
+   * Path: DELETE /api/orgs/{orgId}/whatsapp/sessions/{sessionId}
    */
   async deleteWhatsAppSession(
     sessionId: string,
@@ -1065,33 +1120,24 @@ export class TelenowClient {
   ): Promise<{ success: boolean }> {
     const targetOrgId = orgId ?? (await this.resolveOrgId());
 
-    const candidateEndpoints = [
-      `/api/orgs/${targetOrgId}/whatsapp/sessions/${sessionId}`,
-      `/api/orgs/${targetOrgId}/whatsapp-cloud/sessions/${sessionId}`,
-      `/api/app-whatsapp/sessions/${sessionId}`,
-      `/api/whatsapp/sessions/${sessionId}`,
-    ];
-
-    for (const endpoint of candidateEndpoints) {
-      try {
-        await this.request(
-          "DELETE",
-          endpoint,
-          undefined,
-          undefined,
-          { "X-Org-Id": targetOrgId },
-        );
-        return { success: true };
-      } catch (err) {
-        // continue
-      }
+    try {
+      await this.request(
+        "DELETE",
+        `/api/orgs/${targetOrgId}/whatsapp/sessions/${sessionId}`,
+        undefined,
+        undefined,
+        { "X-Org-Id": targetOrgId },
+      );
+    } catch {
+      // ignore
     }
 
     return { success: true };
   }
 
   /**
-   * Disconnects and removes a WhatsApp channel.
+   * Disconnects and removes a WhatsApp channel via the Org API.
+   * Path: DELETE /api/orgs/{orgId}/whatsapp-hub/channels/{channelId}
    */
   async deleteWhatsAppChannel(
     channelId: string,
@@ -1099,37 +1145,39 @@ export class TelenowClient {
   ): Promise<{ success: boolean }> {
     const targetOrgId = orgId ?? (await this.resolveOrgId());
 
-    const candidateEndpoints = [
-      `/api/orgs/${targetOrgId}/whatsapp/sessions/${channelId}`,
-      `/api/app-whatsapp/channels/${channelId}`,
-      `/api/v1/integrations/connections/${channelId}`,
-      `/api/orgs/${targetOrgId}/whatsapp-hub/channels/${channelId}`,
-      `/api/orgs/${targetOrgId}/whatsapp-cloud/channels/${channelId}`,
-      `/api/whatsapp/channels/${channelId}`,
-    ];
-
-    let lastErr: unknown = null;
-    for (const endpoint of candidateEndpoints) {
-      try {
-        await this.request(
-          "DELETE",
-          endpoint,
-          undefined,
-          undefined,
-          { "X-Org-Id": targetOrgId },
-        );
-        return { success: true };
-      } catch (err) {
-        lastErr = err;
+    try {
+      await this.request(
+        "DELETE",
+        `/api/orgs/${targetOrgId}/whatsapp-hub/channels/${channelId}`,
+        undefined,
+        undefined,
+        { "X-Org-Id": targetOrgId },
+      );
+      return { success: true };
+    } catch (err) {
+      if (err instanceof TelenowError && err.status === 404) {
+        // Fallback: check if it was a session-based channel
+        try {
+          await this.request(
+            "DELETE",
+            `/api/orgs/${targetOrgId}/whatsapp/sessions/${channelId}`,
+            undefined,
+            undefined,
+            { "X-Org-Id": targetOrgId },
+          );
+          return { success: true };
+        } catch {
+          return { success: true };
+        }
       }
+      throw err;
     }
-
-    throw lastErr instanceof Error
-      ? lastErr
-      : new TelenowError(`Failed to disconnect WhatsApp channel ${channelId}.`);
   }
 
-  /** Lists active WhatsApp channels connected to this organization from all Telenow surfaces. */
+  /**
+   * Lists active connected WhatsApp channels in the organization inbox via the Org API.
+   * Path: GET /api/orgs/{orgId}/whatsapp-hub/channels
+   */
   async listWhatsAppChannels(orgId?: string): Promise<
     Array<{
       id: string;
@@ -1151,65 +1199,10 @@ export class TelenowClient {
       }
     >();
 
-    // 1. Check WhatsApp Sessions (GET /api/orgs/{orgId}/whatsapp/sessions)
     try {
       const json = await this.request(
         "GET",
-        `/api/orgs/${targetOrgId}/whatsapp/sessions`,
-        undefined,
-        undefined,
-        { "X-Org-Id": targetOrgId },
-      );
-      const data = asObj(unwrapEnvelope(json)) ?? asObj(json);
-      const rawList = Array.isArray(readKey(data ?? {}, "sessions"))
-        ? (readKey(data ?? {}, "sessions") as Array<Record<string, unknown>>)
-        : Array.isArray(data)
-          ? (data as Array<Record<string, unknown>>)
-          : Array.isArray(json)
-            ? (json as Array<Record<string, unknown>>)
-            : [];
-
-      for (const item of rawList) {
-        const id = String(
-          readKey(item, "id") ??
-            readKey(item, "sessionId") ??
-            readKey(item, "sid") ??
-            "",
-        );
-        if (!id) continue;
-        const phone = String(
-          readKey(item, "phone") ??
-            readKey(item, "number") ??
-            readKey(item, "e164") ??
-            readKey(item, "jid") ??
-            "",
-        );
-        const name = String(
-          readKey(item, "label") ??
-            readKey(item, "name") ??
-            readKey(item, "displayName") ??
-            (phone ? `WhatsApp (${phone})` : "WhatsApp Session"),
-        );
-        const status = String(readKey(item, "status") ?? "active");
-        if (status === "deleted") continue;
-
-        channelMap.set(id, {
-          id,
-          name,
-          phone,
-          status,
-          qualityRating: status === "connected" ? "Connected" : status,
-        });
-      }
-    } catch {
-      // ignore
-    }
-
-    // 2. Check App-WhatsApp Channels (GET /api/app-whatsapp/channels)
-    try {
-      const json = await this.request(
-        "GET",
-        "/api/app-whatsapp/channels",
+        `/api/orgs/${targetOrgId}/whatsapp-hub/channels`,
         undefined,
         undefined,
         { "X-Org-Id": targetOrgId },
@@ -1231,148 +1224,46 @@ export class TelenowClient {
             "",
         );
         if (!id) continue;
-        const phone = String(
-          readKey(item, "phone") ??
-            readKey(item, "e164") ??
-            readKey(item, "number") ??
-            "",
-        );
-        const name = String(
+        const phone =
+          asString(item, "phone") ||
+          asString(item, "number") ||
+          asString(item, "e164") ||
+          extractWhatsAppPhoneNumber(item);
+        const rawName = String(
           readKey(item, "label") ??
             readKey(item, "name") ??
             readKey(item, "displayName") ??
-            "WhatsApp Channel",
-        );
-        const qr =
-          asString(item, "qualityRating") ?? asString(item, "quality_rating");
+            "",
+        ).trim();
+        const name = rawName || (phone ? `WhatsApp (${phone})` : "WhatsApp Channel");
         const status = String(readKey(item, "status") ?? "active");
+        if (status === "deleted") continue;
 
-        channelMap.set(id, {
+        const qr =
+          asString(item, "qualityRating") ??
+          asString(item, "quality_rating") ??
+          (status === "connected" ? "Connected" : undefined);
+
+        const channelObj: {
+          id: string;
+          name: string;
+          phone: string;
+          status: string;
+          qualityRating?: string;
+        } = {
           id,
           name,
           phone,
           status,
-          qualityRating: qr || undefined,
-        });
-      }
-    } catch {
-      // ignore
-    }
-
-    // 3. Check Workspace Integration Connections (GET /api/v1/integrations/connections)
-    try {
-      const json = await this.request("GET", "/api/v1/integrations/connections");
-      const data = asObj(unwrapEnvelope(json)) ?? asObj(json);
-      const rawList = Array.isArray(readKey(data ?? {}, "connections"))
-        ? (readKey(data ?? {}, "connections") as Array<Record<string, unknown>>)
-        : Array.isArray(data)
-          ? (data as Array<Record<string, unknown>>)
-          : Array.isArray(json)
-            ? (json as Array<Record<string, unknown>>)
-            : [];
-
-      for (const conn of rawList) {
-        const providerId = String(readKey(conn, "providerId") ?? "").toLowerCase();
-        if (
-          providerId.includes("whatsapp") ||
-          providerId === "aisensy" ||
-          providerId === "gupshup"
-        ) {
-          const id = String(readKey(conn, "id") ?? "");
-          if (!id) continue;
-          const label = String(
-            readKey(conn, "label") ??
-              readKey(conn, "name") ??
-              "WhatsApp Integration",
-          );
-          const settings = asObj(readKey(conn, "settings")) ?? {};
-          const phone = String(
-            readKey(settings, "phone") ??
-              readKey(settings, "number") ??
-              readKey(settings, "sender") ??
-              readKey(settings, "account") ??
-              "",
-          );
-          const status = String(readKey(conn, "status") ?? "active");
-
-          if (!channelMap.has(id)) {
-            channelMap.set(id, {
-              id,
-              name: label,
-              phone,
-              status,
-              qualityRating: "Connected",
-            });
-          }
+        };
+        if (qr) {
+          channelObj.qualityRating = qr;
         }
+
+        channelMap.set(id, channelObj);
       }
-    } catch {
-      // ignore
-    }
-
-    // 4. Check WhatsApp Hub / Cloud Channels fallback
-    const fallbackEndpoints = [
-      `/api/orgs/${targetOrgId}/whatsapp-hub/channels`,
-      `/api/orgs/${targetOrgId}/whatsapp-cloud/channels`,
-      `/api/orgs/${targetOrgId}/whatsapp-cloud/accounts`,
-      `/api/whatsapp/channels`,
-    ];
-
-    for (const endpoint of fallbackEndpoints) {
-      try {
-        const json = await this.request(
-          "GET",
-          endpoint,
-          undefined,
-          undefined,
-          { "X-Org-Id": targetOrgId },
-        );
-        const data = asObj(unwrapEnvelope(json)) ?? asObj(json);
-        const list = Array.isArray(readKey(data ?? {}, "channels"))
-          ? (readKey(data ?? {}, "channels") as Array<Record<string, unknown>>)
-          : Array.isArray(readKey(data ?? {}, "accounts"))
-            ? (readKey(data ?? {}, "accounts") as Array<Record<string, unknown>>)
-            : Array.isArray(data)
-              ? (data as Array<Record<string, unknown>>)
-              : Array.isArray(json)
-                ? (json as Array<Record<string, unknown>>)
-                : [];
-
-        for (const item of list) {
-          const id = String(
-            readKey(item, "id") ??
-              readKey(item, "channelId") ??
-              readKey(item, "waba_id") ??
-              "",
-          );
-          if (!id || channelMap.has(id)) continue;
-          const phone = String(
-            readKey(item, "phone") ??
-              readKey(item, "e164") ??
-              readKey(item, "number") ??
-              readKey(item, "display_phone_number") ??
-              "",
-          );
-          const name = String(
-            readKey(item, "name") ??
-              readKey(item, "label") ??
-              readKey(item, "displayName") ??
-              "WhatsApp Channel",
-          );
-          const status = String(readKey(item, "status") ?? "active");
-          const qr = asString(item, "qualityRating") ?? asString(item, "quality_rating");
-
-          channelMap.set(id, {
-            id,
-            name,
-            phone,
-            status,
-            qualityRating: qr || undefined,
-          });
-        }
-      } catch {
-        // continue
-      }
+    } catch (err) {
+      console.warn("[telenow] failed to fetch whatsapp-hub channels:", err);
     }
 
     return Array.from(channelMap.values());
@@ -1380,7 +1271,8 @@ export class TelenowClient {
 
   /**
    * Uploads a file (PDF, document, image, video) to Telenow's WhatsApp channel
-   * and returns the resulting mediaId for delivery.
+   * and returns the resulting mediaId for delivery via the Org API.
+   * Path: POST /api/orgs/{orgId}/whatsapp-hub/channels/{channelId}/media
    */
   async uploadWhatsAppMedia(
     channelId: string,
@@ -1396,55 +1288,50 @@ export class TelenowClient {
     });
     form.append("file", blob, fileName);
 
-    const candidateEndpoints = [
-      `/api/app-whatsapp/channels/${channelId}/media`,
+    const json = await this.request(
+      "POST",
       `/api/orgs/${targetOrgId}/whatsapp-hub/channels/${channelId}/media`,
-    ];
+      form,
+      undefined,
+      { "X-Org-Id": targetOrgId },
+    );
 
-    let lastErr: unknown = null;
-    for (const endpoint of candidateEndpoints) {
-      try {
-        const json = await this.request(
-          "POST",
-          endpoint,
-          form,
-          undefined,
-          { "X-Org-Id": targetOrgId },
-        );
-
-        const data = asObj(unwrapEnvelope(json));
-        const mediaId = asString(data, "mediaId") ?? asString(data, "id");
-        if (mediaId) {
-          return {
-            mediaId,
-            mime: asString(data, "mime") || mimeType,
-            filename: asString(data, "filename") || fileName,
-          };
-        }
-      } catch (err) {
-        lastErr = err;
-      }
+    const data = asObj(unwrapEnvelope(json)) ?? asObj(json);
+    const mediaId = asString(data, "mediaId") ?? asString(data, "id");
+    if (!mediaId) {
+      throw new TelenowError("Failed to upload WhatsApp media: no mediaId returned.");
     }
 
-    throw lastErr instanceof Error ? lastErr : new TelenowError("Failed to upload WhatsApp media.");
+    return {
+      mediaId,
+      mime: asString(data, "mime") || mimeType,
+      filename: asString(data, "filename") || fileName,
+    };
   }
 
   /**
-   * Sends a text message or media attachment over WhatsApp.
+   * Sends a text message or media attachment over WhatsApp using the official Org API.
+   * Path: POST /api/orgs/{orgId}/whatsapp-hub/channels/{channelId}/send
+   *
+   * Contract notes (from telenow.ai/docs/wa-text & wa-media):
+   * - Destination phone is passed in `to` (E.164 string).
+   * - Free-form text message MUST be passed in `body` (NOT `message` or `text`).
+   * - Media attachment is passed in `mediaId` (with optional `caption`).
+   * - Optional reply quoting is passed in `reply_to`.
    */
   async sendWhatsAppMessage(
     input: {
-      channelId?: string;
+      channelId?: string | null | undefined;
       to: string;
-      message?: string;
-      mediaId?: string;
-      caption?: string;
-      replyTo?: string;
+      message?: string | null | undefined;
+      mediaId?: string | null | undefined;
+      caption?: string | null | undefined;
+      replyTo?: string | null | undefined;
     },
     orgId?: string,
   ): Promise<{ wamid: string }> {
     const targetOrgId = orgId ?? (await this.resolveOrgId());
-    let channelId = input.channelId;
+    let channelId = input.channelId || undefined;
 
     // If channelId was not provided, auto-resolve the first active WhatsApp channel
     if (!channelId) {
@@ -1463,17 +1350,16 @@ export class TelenowClient {
     const normalizedTo = normalizeE164Phone(input.to);
 
     const payload: Record<string, unknown> = {
-      channelId,
       to: normalizedTo,
     };
 
-    if (input.mediaId) {
-      payload["mediaId"] = input.mediaId;
+    if (input.mediaId?.trim()) {
+      payload["mediaId"] = input.mediaId.trim();
       if (input.caption?.trim()) {
         payload["caption"] = input.caption.trim();
       }
-    } else if (input.message) {
-      payload["message"] = input.message.trim();
+    } else if (input.message?.trim()) {
+      payload["body"] = input.message.trim();
     } else {
       throw new TelenowError("WhatsApp message must contain either text message or mediaId.");
     }
@@ -1482,47 +1368,98 @@ export class TelenowClient {
       payload["reply_to"] = input.replyTo.trim();
     }
 
-    // Try App-Key endpoint first
-    try {
-      const json = await this.request(
-        "POST",
-        "/api/app-whatsapp/send",
-        payload,
-        undefined,
-        { "X-Org-Id": targetOrgId },
-      );
+    const json = await this.request(
+      "POST",
+      `/api/orgs/${targetOrgId}/whatsapp-hub/channels/${channelId}/send`,
+      payload,
+      undefined,
+      { "X-Org-Id": targetOrgId },
+    );
 
-      const data = asObj(unwrapEnvelope(json));
-      const wamid = asString(data, "wamid") || asString(data, "id") || "wamid.success";
-      return { wamid };
-    } catch (appErr) {
-      // Try Hub endpoint fallback
-      try {
-        const hubPayload: Record<string, unknown> = {
-          to: normalizedTo,
-        };
-        if (input.mediaId) {
-          hubPayload["mediaId"] = input.mediaId;
-          if (input.caption?.trim()) hubPayload["caption"] = input.caption.trim();
-        } else if (input.message) {
-          hubPayload["message"] = input.message.trim();
-          hubPayload["text"] = input.message.trim();
-        }
+    const data = asObj(unwrapEnvelope(json)) ?? asObj(json);
+    const wamid = asString(data, "wamid") || asString(data, "id") || "wamid.success";
+    return { wamid };
+  }
 
-        const hubJson = await this.request(
-          "POST",
-          `/api/orgs/${targetOrgId}/whatsapp-hub/channels/${channelId}/send`,
-          hubPayload,
-          undefined,
-          { "X-Org-Id": targetOrgId },
-        );
-        const hubData = asObj(unwrapEnvelope(hubJson));
-        const wamid = asString(hubData, "wamid") || asString(hubData, "id") || "wamid.success";
-        return { wamid };
-      } catch (hubErr) {
-        throw appErr instanceof TelenowError ? appErr : hubErr;
+  /**
+   * Sends a pre-approved template message over WhatsApp via the Org API.
+   * Path: POST /api/orgs/{orgId}/whatsapp-hub/channels/{channelId}/send-template
+   */
+  async sendWhatsAppTemplate(
+    input: {
+      channelId?: string | null | undefined;
+      to: string;
+      template: string;
+      language?: string;
+      variables?: string[];
+      components?: Array<Record<string, unknown>>;
+    },
+    orgId?: string,
+  ): Promise<{ wamid: string }> {
+    const targetOrgId = orgId ?? (await this.resolveOrgId());
+    let channelId = input.channelId || undefined;
+
+    if (!channelId) {
+      const channels = await this.listWhatsAppChannels(targetOrgId);
+      if (channels.length > 0 && channels[0]?.id) {
+        channelId = channels[0].id;
       }
     }
+
+    if (!channelId) {
+      throw new TelenowError(
+        "No active WhatsApp channel is configured for your organization in Telenow.",
+      );
+    }
+
+    const normalizedTo = normalizeE164Phone(input.to);
+    const payload: Record<string, unknown> = {
+      to: normalizedTo,
+      template: input.template.trim(),
+      language: input.language?.trim() || "en_US",
+    };
+
+    if (input.components && input.components.length > 0) {
+      payload["components"] = input.components;
+    } else if (input.variables) {
+      payload["variables"] = input.variables;
+    }
+
+    const json = await this.request(
+      "POST",
+      `/api/orgs/${targetOrgId}/whatsapp-hub/channels/${channelId}/send-template`,
+      payload,
+      undefined,
+      { "X-Org-Id": targetOrgId },
+    );
+
+    const data = asObj(unwrapEnvelope(json)) ?? asObj(json);
+    const wamid = asString(data, "wamid") || asString(data, "id") || "wamid.success";
+    return { wamid };
+  }
+
+  /**
+   * Lists approved templates for a WhatsApp channel via the Org API.
+   * Path: GET /api/orgs/{orgId}/whatsapp-hub/channels/{channelId}/templates
+   */
+  async listWhatsAppTemplates(
+    channelId: string,
+    orgId?: string,
+  ): Promise<Array<Record<string, unknown>>> {
+    const targetOrgId = orgId ?? (await this.resolveOrgId());
+    const json = await this.request(
+      "GET",
+      `/api/orgs/${targetOrgId}/whatsapp-hub/channels/${channelId}/templates`,
+      undefined,
+      undefined,
+      { "X-Org-Id": targetOrgId },
+    );
+    const data = asObj(unwrapEnvelope(json)) ?? asObj(json);
+    return Array.isArray(readKey(data, "templates"))
+      ? (readKey(data, "templates") as Array<Record<string, unknown>>)
+      : Array.isArray(data)
+        ? (data as Array<Record<string, unknown>>)
+        : [];
   }
 }
 
