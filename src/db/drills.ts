@@ -119,6 +119,8 @@ export const drills = pgTable("drills", {
 
   // WhatsApp deliverable resources (video links, PDFs, documents, cheat sheets)
   whatsappResources: jsonb("whatsapp_resources").notNull().default([]),
+  /** Sending WhatsApp channel ID override for this course */
+  whatsappChannelId: varchar("whatsapp_channel_id", { length: 255 }),
 
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()

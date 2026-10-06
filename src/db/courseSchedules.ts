@@ -104,6 +104,9 @@ export const courseSchedules = pgTable(
     /** Optional custom message note to include in the WhatsApp notification */
     customMessage: text("custom_message"),
 
+    /** Sending WhatsApp channel ID override for this schedule */
+    whatsappChannelId: varchar("whatsapp_channel_id", { length: 255 }),
+
     status: courseScheduleStatusEnum("status").notNull().default("scheduled"),
 
     /** "course_default" (all enrolled in course) or "custom" */

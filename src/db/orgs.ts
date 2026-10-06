@@ -25,6 +25,8 @@ export const orgs = pgTable("orgs", {
   telenowOrgId: varchar("telenow_org_id", { length: 255 }),
   /** Timestamp when Telenow API key was validated and connected. */
   telenowConnectedAt: timestamp("telenow_connected_at", { withTimezone: true }),
+  /** Organization default sending WhatsApp channel ID */
+  defaultWhatsappChannelId: varchar("default_whatsapp_channel_id", { length: 255 }),
   isActive: boolean("is_active").notNull().default(true),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
